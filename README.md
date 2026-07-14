@@ -117,6 +117,11 @@ docker compose logs --since=30m app | grep '<requestId>'
 로그는 파일당 10MB, 최대 5개로 순환됩니다. 오류 응답 필드와 전체 코드 목록은
 [`docs/ERROR_CODES.md`](docs/ERROR_CODES.md)를 확인하세요.
 
+브라우저에서는 `http://<AI서버>:8000/observability`를 열어 로그를 조회할 수 있습니다.
+화면에 내부 API Key를 입력하면 브라우저 메모리에서만 `X-Internal-Api-Key` 헤더로
+전송하며, Key가 URL·로그·로컬 저장소에 남지 않습니다. Gateway·AI·MCP·Stats 로그를
+최대 `BROWSER_LOG_BUFFER_SIZE`개까지 조회할 수 있습니다.
+
 실제 Claude API로 질문 4종과 일일 보고서를 다시 평가하려면 Compose 앱이 실행 중인 상태에서 다음 명령을 사용합니다. 이 평가는 로컬 계약 데이터를 사용하므로 원격 백엔드 JWT 상태와 무관합니다.
 
 ```powershell

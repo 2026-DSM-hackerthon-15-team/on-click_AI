@@ -91,3 +91,15 @@ docker compose logs --since=30m app | grep 'upstream.request.failed'
 
 각 줄은 JSON이며 주요 이벤트는 `request.started`, `request.completed`, `api.error`,
 `upstream.request.*`, `tool.upstream.*`, `pos.request.*`, `browser_mcp.request.*`입니다.
+
+## 브라우저 로그 뷰어
+
+`http://<AI서버>:8000/observability`에서 Gateway·AI·MCP·Stats의 최근 안전 로그를
+조회할 수 있습니다. 조회 API는 `GET /internal/observability/logs`이며
+`X-Internal-Api-Key`가 필요합니다. 화면은 Key를 URL이나 저장소에 기록하지 않고
+요청 헤더로만 전송합니다.
+
+브라우저에는 시간, 서비스, 이벤트, Request ID, 상태 코드, 오류 코드, 지연 시간 등
+허용된 진단 필드만 표시됩니다. 요청 본문, JWT, API Key, 비밀번호, 예외 스택은 표시되지
+않습니다. 기본 버퍼는 프로세스별 500개이며 `BROWSER_LOG_BUFFER_SIZE`로 50~5000개 사이에서
+조정할 수 있습니다.

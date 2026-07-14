@@ -42,6 +42,7 @@ from src.instagram import (
 )
 from src.langchain_tools import TOOL_DESCRIPTIONS, get_langchain_tools, get_tool_map
 from src.observability import (
+    install_browser_log_api,
     install_observability,
     log_event,
     request_headers,
@@ -187,6 +188,9 @@ CHAT_READ_ONLY_TOOLS = frozenset(TOOL_DESCRIPTIONS)
 def _require_internal_key(value: str | None) -> None:
     if not value or not hmac.compare_digest(value, settings.internal_api_key):
         raise api_error(401, "INVALID_INTERNAL_API_KEY", "내부 API Key가 올바르지 않습니다.")
+
+
+install_browser_log_api(app, "ai-service", _require_internal_key)
 
 
 def _allowed_tools(payload: AiChatRequest) -> list[str]:

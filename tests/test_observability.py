@@ -7,8 +7,9 @@ import unittest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from src.api.main import app as gateway_app
 from src.errors import install_error_handlers
-from src.observability import JsonLogFormatter, install_observability
+from src.observability import BrowserLogHandler, JsonLogFormatter, browser_logs, install_observability
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -53,6 +54,70 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual("backend-log-002", body["requestId"])
         self.assertEqual("BACKEND_API", body["upstreamService"])
         self.assertEqual("BACKEND_API_CONNECTION_FAILED", body["errorCode"])
+
+    def test_browser_buffer_allow_lists_fields_and_hides_password(self) -> None:
+        record = logging.LogRecord(
+            name="on_click.test",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="browser.test",
+            args=(),
+            exc_info=None,
+        )
+        record.event = "browser.test"
+        record.requestId = "browser-safe-001"
+        record.service = "ai-service"
+        record.errorCode = "TEST_ERROR"
+        record.instagramPassword = "must-not-appear"
+        BrowserLogHandler("ai-service").emit(record)
+
+        rows = browser_logs(request_id="browser-safe-001")
+
+        self.assertEqual("TEST_ERROR", rows[0]["errorCode"])
+        self.assertNotIn("instagramPassword", rows[0])
+        self.assertNotIn("must-not-appear", str(rows[0]))
+
+    def test_gateway_exposes_key_protected_browser_log_view(self) -> None:
+        client = TestClient(gateway_app)
+        root = logging.getLogger()
+        previous_level = root.level
+        previous_handlers = root.handlers[:]
+        root.setLevel(logging.INFO)
+        for handler in previous_handlers:
+            root.removeHandler(handler)
+        root.addHandler(BrowserLogHandler("api-gateway"))
+        try:
+            client.get(
+                "/stores",
+                headers={
+                    "Authorization": "Bearer user-1",
+                    "X-Request-ID": "browser-gateway-001",
+                },
+            )
+
+            denied = client.get("/internal/observability/logs?service=api-gateway")
+            response = client.get(
+                "/internal/observability/logs?service=api-gateway&requestId=browser-gateway-001",
+                headers={"X-Internal-Api-Key": "secret"},
+            )
+            viewer = client.get("/observability")
+        finally:
+            for handler in root.handlers[:]:
+                root.removeHandler(handler)
+            for handler in previous_handlers:
+                root.addHandler(handler)
+            root.setLevel(previous_level)
+
+        self.assertEqual(401, denied.status_code)
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.json()["sources"][0]["available"])
+        self.assertTrue(
+            any(row.get("requestId") == "browser-gateway-001" for row in response.json()["logs"])
+        )
+        self.assertEqual(200, viewer.status_code)
+        self.assertIn("X-Internal-Api-Key", viewer.text)
+        self.assertIn("/internal/observability/logs", viewer.text)
 
 
 if __name__ == "__main__":

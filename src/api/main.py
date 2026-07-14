@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from fastapi import FastAPI, Header, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.consulting import analyze_consulting
@@ -27,9 +28,11 @@ from src.feature_contracts import (
     TomorrowVisitorsForecastResponse,
 )
 from src.observability import (
+    browser_logs,
     install_observability,
     log_event,
     request_headers,
+    render_log_viewer_html,
     safe_upstream_target,
     upstream_service_name,
 )
@@ -428,6 +431,78 @@ def _proxy_json(
         latencyMs=round((time.perf_counter() - started) * 1000, 2),
     )
     return body
+
+
+@app.get("/observability", include_in_schema=False, response_class=HTMLResponse)
+def observability_viewer() -> str:
+    return render_log_viewer_html()
+
+
+@app.get("/internal/observability/logs", include_in_schema=False)
+def browser_observability_logs(
+    limit: int = Query(default=200, ge=1, le=500),
+    requestId: str | None = Query(default=None, max_length=128),
+    level: str | None = Query(default=None, max_length=20),
+    event: str | None = Query(default=None, max_length=100),
+    service: str = Query(default="all", max_length=30),
+    x_internal_api_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_internal_key(x_internal_api_key)
+    services: dict[str, tuple[str, str | None]] = {
+        "api-gateway": ("api-gateway", None),
+        "ai-service": ("ai-service", settings.ai_service_url),
+        "mcp-service": ("mcp-service", settings.mcp_service_url),
+        "stats-service": ("stats-service", settings.stats_service_url),
+    }
+    selected = list(services) if service == "all" else [service]
+    if any(name not in services for name in selected):
+        raise api_error(
+            400,
+            "INVALID_LOG_SERVICE_FILTER",
+            "service는 all, api-gateway, ai-service, mcp-service, stats-service 중 하나여야 합니다.",
+        )
+
+    filters = {"limit": limit, "requestId": requestId, "level": level, "event": event}
+    rows: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
+    for name in selected:
+        label, base_url = services[name]
+        if base_url is None:
+            rows.extend(
+                browser_logs(
+                    limit=limit,
+                    request_id=requestId,
+                    level=level,
+                    event=event,
+                )
+            )
+            sources.append({"service": label, "available": True})
+            continue
+        target = f"{base_url}/internal/observability/logs"
+        try:
+            response = requests.get(
+                target,
+                params={key: value for key, value in filters.items() if value is not None},
+                headers=request_headers({"X-Internal-Api-Key": settings.internal_api_key}),
+                timeout=settings.request_timeout_seconds,
+            )
+            body = response.json()
+            if not response.ok or not isinstance(body, dict) or not isinstance(body.get("logs"), list):
+                raise ValueError("invalid log source response")
+            rows.extend(body["logs"])
+            sources.append({"service": label, "available": True})
+        except (requests.RequestException, ValueError):
+            log_event(
+                logger,
+                logging.WARNING,
+                "observability.source_unavailable",
+                sourceService=label,
+            )
+            sources.append(
+                {"service": label, "available": False, "errorCode": "LOG_SOURCE_UNAVAILABLE"}
+            )
+    rows.sort(key=lambda row: str(row.get("timestamp", "")), reverse=True)
+    return {"logs": rows[:limit], "sources": sources}
 
 
 @app.post("/ai/chat", response_model=AiChatResponse)

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from src.errors import api_error, install_error_handlers
 from src.observability import (
+    install_browser_log_api,
     install_observability,
     log_event,
     request_headers,
@@ -39,6 +40,9 @@ class ForecastRequest(BaseModel):
 def _require_internal_key(value: str | None) -> None:
     if not value or not hmac.compare_digest(value, settings.internal_api_key):
         raise api_error(401, "INVALID_INTERNAL_API_KEY", "내부 API Key가 올바르지 않습니다.")
+
+
+install_browser_log_api(app, "stats-service", _require_internal_key)
 
 
 def _load_transactions(store_id: int) -> list[dict[str, Any]]:
