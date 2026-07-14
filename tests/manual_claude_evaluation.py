@@ -21,13 +21,8 @@ os.environ.setdefault(
     "API_BASE_URL",
     os.getenv("CLAUDE_EVAL_API_BASE_URL", "http://127.0.0.1:8000"),
 )
-os.environ.setdefault(
-    "BACKEND_AUTH_TOKEN",
-    os.getenv("CLAUDE_EVAL_BACKEND_AUTH_TOKEN", ""),
-)
 
 from src.ai_service.main import app
-from src.settings import settings
 
 QUESTIONS = [
     {
@@ -59,7 +54,7 @@ QUESTIONS = [
 
 def main() -> None:
     client = TestClient(app)
-    headers = {"X-Internal-Api-Key": settings.internal_api_key}
+    headers = {"Authorization": f"Bearer {os.getenv('CLAUDE_EVAL_JWT', 'manual-test-jwt')}"}
     results = []
     for case in ([] if os.getenv("REPORT_ONLY") == "1" else QUESTIONS):
         started = time.perf_counter()

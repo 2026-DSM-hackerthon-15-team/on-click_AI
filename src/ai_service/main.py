@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import base64
 import ipaddress
 import json
@@ -15,6 +14,7 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.auth import require_backend_jwt
 from src.consulting import analyze_consulting
 from src.daily_consulting import (
     generate_daily_consulting as build_daily_consulting,
@@ -185,12 +185,7 @@ KEYWORD_TOOLS = {
 CHAT_READ_ONLY_TOOLS = frozenset(TOOL_DESCRIPTIONS)
 
 
-def _require_internal_key(value: str | None) -> None:
-    if not value or not hmac.compare_digest(value, settings.internal_api_key):
-        raise api_error(401, "INVALID_INTERNAL_API_KEY", "내부 API Key가 올바르지 않습니다.")
-
-
-install_browser_log_api(app, "ai-service", _require_internal_key)
+install_browser_log_api(app, "ai-service", require_backend_jwt)
 
 
 def _allowed_tools(payload: AiChatRequest) -> list[str]:
@@ -440,8 +435,8 @@ def _run_langchain_agent(payload: AiChatRequest, allowed: list[str]) -> AiChatRe
         return None
 
 
-def _handle_chat(payload: AiChatRequest, api_key: str | None) -> AiChatResponse:
-    _require_internal_key(api_key)
+def _handle_chat(payload: AiChatRequest, authorization: str | None) -> AiChatResponse:
+    require_backend_jwt(authorization)
     allowed = _allowed_tools(payload)
     return _run_langchain_agent(payload, allowed) or _run_rule_agent(payload, allowed)
 
@@ -649,25 +644,25 @@ def _generate_marketing_copy(payload: GenerateMarketingCopyRequest) -> GenerateM
 @app.post("/ai/chat", response_model=AiChatResponse)
 def ai_chat(
     payload: AiChatRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> AiChatResponse:
-    return _handle_chat(payload, x_internal_api_key)
+    return _handle_chat(payload, authorization)
 
 
 @app.post("/run_agent", response_model=AiChatResponse, include_in_schema=False)
 def run_agent(
     payload: AiChatRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> AiChatResponse:
-    return _handle_chat(payload, x_internal_api_key)
+    return _handle_chat(payload, authorization)
 
 
 @app.post("/ai/consultings", response_model=GenerateConsultingResponse)
 def generate_consulting(
     payload: GenerateConsultingRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     try:
         return analyze_consulting(payload.model_dump(mode="json"))
     except ValueError as exc:
@@ -682,9 +677,9 @@ def generate_consulting(
 @app.post("/ai/consultings/daily", response_model=GenerateDailyConsultingResponse)
 def generate_daily_consulting(
     payload: GenerateDailyConsultingRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     try:
         report = build_daily_consulting(payload.model_dump(mode="json"))
         return _write_daily_report_with_llm(report)
@@ -701,9 +696,9 @@ def generate_daily_consulting(
 @app.post("/ai/forecasts/closing-sales", response_model=ClosingSalesForecastResponse)
 def forecast_closing_sales(
     payload: ClosingSalesForecastRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     transactions = [item.model_dump(mode="json") for item in payload.salesData]
     if not any(item["status"] == "COMPLETED" for item in transactions):
         raise api_error(422, "INSUFFICIENT_FORECAST_DATA", "예측 가능한 완료 거래가 없습니다.")
@@ -727,9 +722,9 @@ def forecast_closing_sales(
 @app.post("/ai/forecasts/tomorrow-visitors", response_model=TomorrowVisitorsForecastResponse)
 def forecast_tomorrow_visitors(
     payload: TomorrowVisitorsForecastRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     transactions = [item.model_dump(mode="json") for item in payload.salesData]
     if not any(item["status"] == "COMPLETED" for item in transactions):
         raise api_error(422, "INSUFFICIENT_FORECAST_DATA", "예측 가능한 완료 거래가 없습니다.")
@@ -750,9 +745,9 @@ def forecast_tomorrow_visitors(
 @app.post("/ai/marketings/copy", response_model=GenerateMarketingCopyResponse)
 def generate_marketing_copy(
     payload: GenerateMarketingCopyRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> GenerateMarketingCopyResponse:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     try:
         return _generate_marketing_copy(payload)
     except Exception as exc:
@@ -828,9 +823,9 @@ def generate_marketing_copy(
 def publish_instagram(
     marketingId: int,
     payload: PublishInstagramRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     try:
         publish_payload = payload.model_dump(mode="json")
         publish_payload["instagramPassword"] = payload.instagramPassword.get_secret_value()

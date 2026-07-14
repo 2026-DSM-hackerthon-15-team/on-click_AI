@@ -8,16 +8,21 @@ import requests
 from fastapi.testclient import TestClient
 
 from src.api.main import app
+class JwtTestClient(TestClient):
+    def request(self, method, url, *, headers=None, **kwargs):
+        merged = {"Authorization": "Bearer test-backend-jwt"}
+        merged.update(dict(headers or {}))
+        return super().request(method, url, headers=merged, **kwargs)
 
 
 class ApiContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.client = TestClient(app)
+        cls.client = JwtTestClient(app)
         cls.auth = {"Authorization": "Bearer user-1"}
 
     def test_error_body_uses_common_contract(self) -> None:
-        response = self.client.get(
+        response = TestClient(app).get(
             "/stores", headers={"X-Request-ID": "backend-integration-001"}
         )
         self.assertEqual(401, response.status_code)
@@ -131,7 +136,6 @@ class ApiContractTests(unittest.TestCase):
             "/ai/chat",
             json=self._chat_payload(),
             headers={
-                "X-Internal-Api-Key": "secret",
                 "X-Request-ID": "backend-chat-001",
             },
         )
@@ -146,6 +150,11 @@ class ApiContractTests(unittest.TestCase):
         )
         self.assertEqual("backend-chat-001", response.headers["X-Request-ID"])
         self.assertEqual("SUCCESS", response.json()["usedTools"][0]["status"])
+        forwarded_headers = request.call_args.kwargs["headers"]
+        self.assertEqual(
+            "Bearer test-backend-jwt", forwarded_headers["Authorization"]
+        )
+        self.assertNotIn("X-Internal-Api-Key", forwarded_headers)
 
     def test_chat_missing_available_tools_uses_chat_error_code(self) -> None:
         payload = self._chat_payload()
@@ -153,7 +162,7 @@ class ApiContractTests(unittest.TestCase):
         response = self.client.post(
             "/ai/chat",
             json=payload,
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(400, response.status_code)
         self.assertEqual("INVALID_AI_CHAT_REQUEST", response.json()["errorCode"])
@@ -172,7 +181,7 @@ class ApiContractTests(unittest.TestCase):
         response = self.client.post(
             "/ai/chat",
             json=self._chat_payload(),
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(422, response.status_code)
         self.assertEqual("AI_RESPONSE_INVALID", response.json()["errorCode"])
@@ -182,7 +191,7 @@ class ApiContractTests(unittest.TestCase):
         response = self.client.post(
             "/ai/chat",
             json=self._chat_payload(),
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(504, response.status_code)
         self.assertEqual("AI_TIMEOUT", response.json()["errorCode"])
@@ -198,7 +207,6 @@ class ApiContractTests(unittest.TestCase):
             "/ai/chat",
             json=self._chat_payload(),
             headers={
-                "X-Internal-Api-Key": "secret",
                 "X-Request-ID": "backend-chat-connect-failure",
             },
         )
@@ -221,7 +229,7 @@ class ApiContractTests(unittest.TestCase):
                 "imageUrls": ["https://cdn.example.com/image.jpg"],
                 "idempotencyKey": "password-redaction-test",
             },
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
 
         self.assertEqual(400, response.status_code)
@@ -270,7 +278,7 @@ class ApiContractTests(unittest.TestCase):
         response = self.client.post(
             "/ai/consultings/daily",
             json={"userId": 4, "storeId": 5, "targetDate": "2026-07-14"},
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual("DAILY_V1", request.call_args.kwargs["json"]["reportFormat"])
@@ -302,7 +310,7 @@ class ApiContractTests(unittest.TestCase):
         response = self.client.post(
             "/ai/marketings/21/publish/instagram",
             json=payload,
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual(
@@ -349,7 +357,7 @@ class ApiContractTests(unittest.TestCase):
         forecast = self.client.post(
             "/ai/forecasts/closing-sales",
             json=sales_payload,
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         copy = self.client.post(
             "/ai/marketings/copy",
@@ -359,7 +367,7 @@ class ApiContractTests(unittest.TestCase):
                 "draftText": "딸기 라떼 소개",
                 "tags": ["딸기라떼"],
             },
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
 
         self.assertEqual(200, forecast.status_code)

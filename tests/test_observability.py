@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from src.api.main import app as gateway_app
 from src.errors import install_error_handlers
 from src.observability import BrowserLogHandler, JsonLogFormatter, browser_logs, install_observability
+from src.settings import settings
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -96,10 +97,10 @@ class ObservabilityTests(unittest.TestCase):
                 },
             )
 
-            denied = client.get("/internal/observability/logs?service=api-gateway")
+            denied = TestClient(gateway_app).get("/internal/observability/logs?service=api-gateway")
             response = client.get(
                 "/internal/observability/logs?service=api-gateway&requestId=browser-gateway-001",
-                headers={"X-Internal-Api-Key": "secret"},
+                headers={"Authorization": "Bearer test-backend-jwt"},
             )
             viewer = client.get("/observability")
         finally:
@@ -116,7 +117,7 @@ class ObservabilityTests(unittest.TestCase):
             any(row.get("requestId") == "browser-gateway-001" for row in response.json()["logs"])
         )
         self.assertEqual(200, viewer.status_code)
-        self.assertIn("X-Internal-Api-Key", viewer.text)
+        self.assertIn("Authorization", viewer.text)
         self.assertIn("/internal/observability/logs", viewer.text)
 
 

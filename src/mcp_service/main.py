@@ -1,22 +1,15 @@
-import hmac
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Header, Query
+from fastapi import FastAPI, Query
 
-from src.errors import api_error
+from src.auth import require_backend_jwt
 from src.observability import install_browser_log_api, install_observability
-from src.settings import settings
 
 app = FastAPI(title="mcp-service")
 install_observability(app, "mcp-service")
 
 
-def _require_internal_key(value: str | None) -> None:
-    if not value or not hmac.compare_digest(value, settings.internal_api_key):
-        raise api_error(401, "INVALID_INTERNAL_API_KEY", "내부 API Key가 올바르지 않습니다.")
-
-
-install_browser_log_api(app, "mcp-service", _require_internal_key)
+install_browser_log_api(app, "mcp-service", require_backend_jwt)
 
 
 @app.get("/weather")

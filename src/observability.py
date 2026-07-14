@@ -164,7 +164,7 @@ def browser_logs(
 def install_browser_log_api(
     app: FastAPI,
     service_name: str,
-    require_internal_key: Any,
+    require_backend_jwt: Any,
 ) -> None:
     @app.get("/internal/observability/logs", include_in_schema=False)
     def read_browser_logs(
@@ -172,9 +172,9 @@ def install_browser_log_api(
         requestId: str | None = Query(default=None, max_length=128),
         level: str | None = Query(default=None, max_length=20),
         event: str | None = Query(default=None, max_length=100),
-        x_internal_api_key: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        require_internal_key(x_internal_api_key)
+        require_backend_jwt(authorization)
         return {
             "service": service_name,
             "logs": browser_logs(
@@ -193,8 +193,8 @@ def render_log_viewer_html() -> str:
 <title>ON:CLICK 연동 로그</title>
 <style>body{font:14px system-ui,sans-serif;margin:24px;background:#101828;color:#e5e7eb}input,select,button{padding:8px;margin:4px;background:#1f2937;color:#fff;border:1px solid #475569;border-radius:6px}button{cursor:pointer;background:#2563eb}#status{margin:10px 4px;color:#93c5fd}table{width:100%;border-collapse:collapse;background:#111827}th,td{padding:8px;border-bottom:1px solid #334155;text-align:left;vertical-align:top;word-break:break-word}th{position:sticky;top:0;background:#1e293b}tr.ERROR,tr.CRITICAL{background:#451a1a}tr.WARNING{background:#422006}.mono{font-family:ui-monospace,monospace;font-size:12px}</style>
 </head><body><h1>ON:CLICK 연동 로그</h1>
-<p>내부 API Key는 이 브라우저의 요청 헤더로만 전송되며 저장하지 않습니다.</p>
-<input id="key" type="password" placeholder="X-Internal-Api-Key" autocomplete="off">
+<p>백엔드 JWT는 이 브라우저의 요청 헤더로만 전송되며 저장하지 않습니다.</p>
+<input id="key" type="password" placeholder="Backend JWT" autocomplete="off">
 <input id="requestId" placeholder="Request ID 필터">
 <select id="service"><option value="all">전체 서비스</option><option value="api-gateway">Gateway</option><option value="ai-service">AI</option><option value="mcp-service">MCP</option><option value="stats-service">Stats</option></select>
 <select id="level"><option value="">모든 레벨</option><option>ERROR</option><option>WARNING</option><option>INFO</option></select>
@@ -203,7 +203,7 @@ def render_log_viewer_html() -> str:
 <script>
 let timer; const $=id=>document.getElementById(id);
 function esc(value){const d=document.createElement('div');d.textContent=String(value??'');return d.innerHTML}
-async function loadLogs(){const key=$('key').value;if(!key){$('status').textContent='내부 API Key를 입력하세요.';return}const q=new URLSearchParams({limit:'200',service:$('service').value});if($('requestId').value)q.set('requestId',$('requestId').value);if($('level').value)q.set('level',$('level').value);$('status').textContent='조회 중…';try{const r=await fetch('/internal/observability/logs?'+q,{headers:{'X-Internal-Api-Key':key}});const body=await r.json();if(!r.ok)throw new Error(body.errorCode||r.status);const rows=body.logs||[];$('rows').innerHTML=rows.map(x=>{const detail={...x};delete detail.timestamp;delete detail.service;delete detail.level;delete detail.event;delete detail.requestId;return `<tr class="${esc(x.level)}"><td>${esc(x.timestamp)}</td><td>${esc(x.service)}</td><td>${esc(x.level)}</td><td>${esc(x.event)}</td><td class="mono">${esc(x.requestId)}</td><td class="mono">${esc(JSON.stringify(detail))}</td></tr>`}).join('');$('status').textContent=`${rows.length}개 로그`; }catch(e){$('status').textContent='조회 실패: '+e.message}}
+async function loadLogs(){const key=$('key').value;if(!key){$('status').textContent='백엔드 JWT를 입력하세요.';return}const q=new URLSearchParams({limit:'200',service:$('service').value});if($('requestId').value)q.set('requestId',$('requestId').value);if($('level').value)q.set('level',$('level').value);$('status').textContent='조회 중…';try{const r=await fetch('/internal/observability/logs?'+q,{headers:{'Authorization':'Bearer '+key}});const body=await r.json();if(!r.ok)throw new Error(body.errorCode||r.status);const rows=body.logs||[];$('rows').innerHTML=rows.map(x=>{const detail={...x};delete detail.timestamp;delete detail.service;delete detail.level;delete detail.event;delete detail.requestId;return `<tr class="${esc(x.level)}"><td>${esc(x.timestamp)}</td><td>${esc(x.service)}</td><td>${esc(x.level)}</td><td>${esc(x.event)}</td><td class="mono">${esc(x.requestId)}</td><td class="mono">${esc(JSON.stringify(detail))}</td></tr>`}).join('');$('status').textContent=`${rows.length}개 로그`; }catch(e){$('status').textContent='조회 실패: '+e.message}}
 $('auto').addEventListener('change',e=>{clearInterval(timer);if(e.target.checked)timer=setInterval(loadLogs,5000)});
 </script></body></html>"""
 

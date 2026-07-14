@@ -6,8 +6,6 @@ services:
     working_dir: /app
     command: bash -c "python -m pip install --no-cache-dir -r requirements.txt && python -m src.main"
     environment:
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-secret}
-      BACKEND_AUTH_TOKEN: ${BACKEND_AUTH_TOKEN:-}
       API_BASE_URL: ${API_BASE_URL:-http://127.0.0.1:8000}
       AI_SERVICE_URL: http://127.0.0.1:8001
       MCP_SERVICE_URL: http://127.0.0.1:8002

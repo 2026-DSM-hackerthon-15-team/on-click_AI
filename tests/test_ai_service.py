@@ -7,12 +7,17 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from src.ai_service.main import app
+class JwtTestClient(TestClient):
+    def request(self, method, url, *, headers=None, **kwargs):
+        merged = {"Authorization": "Bearer test-backend-jwt"}
+        merged.update(dict(headers or {}))
+        return super().request(method, url, headers=merged, **kwargs)
 
 
 class AiServiceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.client = TestClient(app)
+        cls.client = JwtTestClient(app)
 
     def _chat_payload(self) -> dict:
         return {
@@ -24,14 +29,14 @@ class AiServiceTests(unittest.TestCase):
             "attachmentKeys": [],
         }
 
-    def test_internal_api_key_is_compared_not_just_present(self) -> None:
-        response = self.client.post(
+    def test_legacy_internal_api_key_does_not_authenticate(self) -> None:
+        response = TestClient(app).post(
             "/ai/chat",
             json=self._chat_payload(),
             headers={"X-Internal-Api-Key": "wrong"},
         )
         self.assertEqual(401, response.status_code)
-        self.assertEqual("INVALID_INTERNAL_API_KEY", response.json()["errorCode"])
+        self.assertEqual("BACKEND_JWT_REQUIRED", response.json()["errorCode"])
 
     @patch("src.ai_service.main._run_langchain_agent", return_value=None)
     @patch("src.ai_service.main.get_tool_map")
@@ -49,7 +54,7 @@ class AiServiceTests(unittest.TestCase):
         response = self.client.post(
             "/ai/chat",
             json=self._chat_payload(),
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
@@ -67,7 +72,7 @@ class AiServiceTests(unittest.TestCase):
         response = self.client.post(
             "/ai/chat",
             json=payload,
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(400, response.status_code)
         self.assertEqual("INVALID_AI_CHAT_REQUEST", response.json()["errorCode"])
@@ -78,7 +83,7 @@ class AiServiceTests(unittest.TestCase):
         response = self.client.post(
             "/ai/chat",
             json=payload,
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(400, response.status_code)
         self.assertEqual("INVALID_AI_CHAT_REQUEST", response.json()["errorCode"])
@@ -92,7 +97,7 @@ class AiServiceTests(unittest.TestCase):
         response = self.client.post(
             "/ai/chat",
             json=self._chat_payload(),
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(502, response.status_code)
         self.assertEqual("TOOL_EXECUTION_ERROR", response.json()["errorCode"])
@@ -106,7 +111,7 @@ class AiServiceTests(unittest.TestCase):
         response = self.client.post(
             "/ai/chat",
             json=payload,
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual([], response.json()["usedTools"])
@@ -134,7 +139,7 @@ class AiServiceTests(unittest.TestCase):
         response = self.client.post(
             "/ai/consultings/daily",
             json={"userId": 4, "storeId": 5, "targetDate": "2026-07-14"},
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual("daily-consulting-v1", response.json()["model"])
@@ -160,7 +165,7 @@ class AiServiceTests(unittest.TestCase):
         response = self.client.post(
             "/ai/consultings",
             json=payload,
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
         self.assertEqual(200, response.status_code)
         body = response.json()
@@ -187,7 +192,7 @@ class AiServiceTests(unittest.TestCase):
                     },
                 ],
             },
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
 
         self.assertEqual(200, response.status_code)
@@ -214,7 +219,7 @@ class AiServiceTests(unittest.TestCase):
                     },
                 ],
             },
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
 
         self.assertEqual(200, response.status_code)
@@ -243,7 +248,7 @@ class AiServiceTests(unittest.TestCase):
                 "tags": ["딸기라떼"],
                 "tone": "친근하게",
             },
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
 
         self.assertEqual(200, response.status_code)

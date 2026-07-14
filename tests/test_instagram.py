@@ -8,6 +8,11 @@ from fastapi.testclient import TestClient
 
 from src.ai_service.main import app
 from src.instagram import BrowserMCPUnavailable, clear_publish_registry, publish_instagram
+class JwtTestClient(TestClient):
+    def request(self, method, url, *, headers=None, **kwargs):
+        merged = {"Authorization": "Bearer test-backend-jwt"}
+        merged.update(dict(headers or {}))
+        return super().request(method, url, headers=merged, **kwargs)
 
 
 def _payload(key: str = "marketing-21-instagram-v2") -> dict:
@@ -25,7 +30,7 @@ def _payload(key: str = "marketing-21-instagram-v2") -> dict:
 class InstagramPublishingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.client = TestClient(app)
+        cls.client = JwtTestClient(app)
 
     def setUp(self) -> None:
         clear_publish_registry()
@@ -34,7 +39,7 @@ class InstagramPublishingTests(unittest.TestCase):
         response = self.client.post(
             "/ai/marketings/21/publish/instagram",
             json=_payload(),
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
 
         self.assertEqual(200, response.status_code)
@@ -44,7 +49,7 @@ class InstagramPublishingTests(unittest.TestCase):
         self.assertNotIn("safe-password-123", response.text)
 
     def test_duplicate_idempotency_key_is_rejected(self) -> None:
-        headers = {"X-Internal-Api-Key": "secret"}
+        headers = {}
         self.assertEqual(
             200,
             self.client.post(
@@ -64,7 +69,7 @@ class InstagramPublishingTests(unittest.TestCase):
         response = self.client.post(
             "/ai/marketings/21/publish/instagram",
             json=payload,
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={},
         )
 
         self.assertEqual(400, response.status_code)
@@ -118,7 +123,6 @@ class InstagramPublishingTests(unittest.TestCase):
                 "/ai/marketings/21/publish/instagram",
                 json=_payload("empty-browser-api-result"),
                 headers={
-                    "X-Internal-Api-Key": "secret",
                     "X-Request-ID": "instagram-browser-failure",
                 },
             )

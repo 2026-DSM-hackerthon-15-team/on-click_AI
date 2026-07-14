@@ -18,13 +18,13 @@
 - `requestId`: 백엔드가 `X-Request-ID`로 보낸 값을 그대로 사용합니다. 없으면 AI 서버가 생성합니다.
 - `retryable`: 동일 요청을 재시도해도 되는 일시적 오류인지 나타냅니다.
 - `details`: 실패한 서비스, 단계, upstream 상태 코드 등 비밀정보가 아닌 진단 정보입니다.
-- 비밀번호, JWT, 내부 API Key, LLM API Key, 요청 본문은 응답과 로그에 기록하지 않습니다.
+- 비밀번호, JWT, LLM API Key, 요청 본문은 응답과 로그에 기록하지 않습니다.
 
 ## 요청·인증
 
 | 오류 코드 | HTTP | 재시도 | 의미 |
 |---|---:|---:|---|
-| `INVALID_INTERNAL_API_KEY` | 401 | 아니요 | 내부 API Key가 없거나 불일치 |
+| `BACKEND_JWT_REQUIRED` | 401 | 아니요 | Authorization Bearer JWT가 없음 |
 | `UNAUTHORIZED` | 401 | 아니요 | JWT가 없거나 형식이 잘못됨 |
 | `STORE_ACCESS_DENIED` | 403 | 아니요 | JWT 사용자가 매장 소유자가 아님 |
 | `INVALID_*_REQUEST` | 400 | 아니요 | DTO 필드 누락·형식·범위 오류 |
@@ -96,7 +96,7 @@ docker compose logs --since=30m app | grep 'upstream.request.failed'
 
 `http://<AI서버>:8000/observability`에서 Gateway·AI·MCP·Stats의 최근 안전 로그를
 조회할 수 있습니다. 조회 API는 `GET /internal/observability/logs`이며
-`X-Internal-Api-Key`가 필요합니다. 화면은 Key를 URL이나 저장소에 기록하지 않고
+백엔드가 발급한 `Authorization: Bearer <JWT>`가 필요합니다. 화면은 JWT를 URL이나 저장소에 기록하지 않고
 요청 헤더로만 전송합니다.
 
 브라우저에는 시간, 서비스, 이벤트, Request ID, 상태 코드, 오류 코드, 지연 시간 등

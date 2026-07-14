@@ -51,8 +51,6 @@ def _ai_model() -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    internal_api_key: str = os.getenv("INTERNAL_API_KEY", "secret")
-    backend_auth_token: str | None = os.getenv("BACKEND_AUTH_TOKEN")
     api_base_url: str = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
     ai_service_url: str = os.getenv("AI_SERVICE_URL", "http://127.0.0.1:8001").rstrip("/")
     mcp_service_url: str = os.getenv("MCP_SERVICE_URL", "http://127.0.0.1:8002").rstrip("/")

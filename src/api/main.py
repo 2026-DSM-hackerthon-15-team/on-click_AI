@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import logging
 import math
 import time
@@ -13,6 +12,7 @@ from fastapi import FastAPI, Header, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from src.auth import backend_authorization_header, is_backend_jwt, require_backend_jwt
 from src.consulting import analyze_consulting
 from src.errors import api_error, install_error_handlers
 from src.feature_contracts import (
@@ -217,10 +217,6 @@ def _build_demo_sales() -> list[dict[str, Any]]:
 SALES_TRANSACTIONS = _build_demo_sales()
 
 
-def _valid_internal_key(value: str | None) -> bool:
-    return bool(value and hmac.compare_digest(value, settings.internal_api_key))
-
-
 def _get_user_id_from_auth(auth_header: str | None) -> int | None:
     if not auth_header or not auth_header.startswith("Bearer "):
         return None
@@ -240,10 +236,9 @@ def _find_store(store_id: int) -> dict[str, Any] | None:
 def _require_store_access(
     store_id: int,
     authorization: str | None,
-    internal_api_key: str | None = None,
 ) -> dict[str, Any]:
     store = _find_store(store_id)
-    if _valid_internal_key(internal_api_key):
+    if is_backend_jwt(authorization):
         if store is None:
             raise api_error(404, "STORE_NOT_FOUND", "매장을 찾을 수 없습니다.")
         return store
@@ -253,11 +248,6 @@ def _require_store_access(
     if store is None or store.get("owner_user_id") != user_id:
         raise api_error(403, "STORE_ACCESS_DENIED", "해당 매장에 접근할 수 없습니다.")
     return store
-
-
-def _require_internal_key(value: str | None) -> None:
-    if not _valid_internal_key(value):
-        raise api_error(401, "INVALID_INTERNAL_API_KEY", "내부 API Key가 올바르지 않습니다.")
 
 
 def _proxy_json(
@@ -445,9 +435,9 @@ def browser_observability_logs(
     level: str | None = Query(default=None, max_length=20),
     event: str | None = Query(default=None, max_length=100),
     service: str = Query(default="all", max_length=30),
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     services: dict[str, tuple[str, str | None]] = {
         "api-gateway": ("api-gateway", None),
         "ai-service": ("ai-service", settings.ai_service_url),
@@ -483,7 +473,7 @@ def browser_observability_logs(
             response = requests.get(
                 target,
                 params={key: value for key, value in filters.items() if value is not None},
-                headers=request_headers({"X-Internal-Api-Key": settings.internal_api_key}),
+                headers=request_headers(backend_authorization_header(authorization)),
                 timeout=settings.request_timeout_seconds,
             )
             body = response.json()
@@ -508,14 +498,14 @@ def browser_observability_logs(
 @app.post("/ai/chat", response_model=AiChatResponse)
 def ai_chat(
     payload: AiChatRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> AiChatResponse:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     body = _proxy_json(
         "POST",
         f"{settings.ai_service_url}/ai/chat",
         json=payload.model_dump(mode="json"),
-        headers={"X-Internal-Api-Key": settings.internal_api_key},
+        headers={"Authorization": authorization},
         timeout_seconds=settings.ai_request_timeout_seconds,
         timeout_error_code="AI_TIMEOUT",
         timeout_message="AI 처리 시간이 초과되었습니다.",
@@ -529,15 +519,15 @@ def ai_chat(
 @app.post("/ai/consultings")
 def generate_consulting(
     payload: dict[str, Any],
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> Any:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     try:
         return _proxy_json(
             "POST",
             f"{settings.ai_service_url}/ai/consultings",
             json=payload,
-            headers={"X-Internal-Api-Key": settings.internal_api_key},
+            headers={"Authorization": authorization},
         )
     except Exception as exc:
         # The single-container demo remains usable if the AI worker is restarting.
@@ -552,14 +542,14 @@ def generate_consulting(
 @app.post("/ai/consultings/daily", response_model=GenerateDailyConsultingResponse)
 def generate_daily_consulting(
     payload: GenerateDailyConsultingRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> GenerateDailyConsultingResponse:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     body = _proxy_json(
         "POST",
         f"{settings.ai_service_url}/ai/consultings/daily",
         json=payload.model_dump(mode="json"),
-        headers={"X-Internal-Api-Key": settings.internal_api_key},
+        headers={"Authorization": authorization},
         timeout_seconds=settings.ai_request_timeout_seconds,
         timeout_error_code="AI_TIMEOUT",
         timeout_message="일일 보고서 생성 시간이 초과되었습니다.",
@@ -573,14 +563,14 @@ def generate_daily_consulting(
 @app.post("/ai/forecasts/closing-sales", response_model=ClosingSalesForecastResponse)
 def forecast_closing_sales_ai(
     payload: ClosingSalesForecastRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> ClosingSalesForecastResponse:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     body = _proxy_json(
         "POST",
         f"{settings.ai_service_url}/ai/forecasts/closing-sales",
         json=payload.model_dump(mode="json"),
-        headers={"X-Internal-Api-Key": settings.internal_api_key},
+        headers={"Authorization": authorization},
         timeout_seconds=settings.ai_request_timeout_seconds,
     )
     try:
@@ -592,14 +582,14 @@ def forecast_closing_sales_ai(
 @app.post("/ai/forecasts/tomorrow-visitors", response_model=TomorrowVisitorsForecastResponse)
 def forecast_tomorrow_visitors_ai(
     payload: TomorrowVisitorsForecastRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> TomorrowVisitorsForecastResponse:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     body = _proxy_json(
         "POST",
         f"{settings.ai_service_url}/ai/forecasts/tomorrow-visitors",
         json=payload.model_dump(mode="json"),
-        headers={"X-Internal-Api-Key": settings.internal_api_key},
+        headers={"Authorization": authorization},
         timeout_seconds=settings.ai_request_timeout_seconds,
     )
     try:
@@ -611,14 +601,14 @@ def forecast_tomorrow_visitors_ai(
 @app.post("/ai/marketings/copy", response_model=GenerateMarketingCopyResponse)
 def generate_marketing_copy(
     payload: GenerateMarketingCopyRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> GenerateMarketingCopyResponse:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     body = _proxy_json(
         "POST",
         f"{settings.ai_service_url}/ai/marketings/copy",
         json=payload.model_dump(mode="json"),
-        headers={"X-Internal-Api-Key": settings.internal_api_key},
+        headers={"Authorization": authorization},
         timeout_seconds=settings.ai_request_timeout_seconds,
         timeout_error_code="AI_TIMEOUT",
         timeout_message="마케팅 문구 생성 시간이 초과되었습니다.",
@@ -636,10 +626,10 @@ def generate_marketing_copy(
 def publish_instagram(
     marketingId: int,
     payload: PublishInstagramRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> PublishInstagramResponse:
-    _require_internal_key(x_internal_api_key)
-    headers = {"X-Internal-Api-Key": settings.internal_api_key}
+    require_backend_jwt(authorization)
+    headers = {"Authorization": authorization}
     publish_payload = payload.model_dump(mode="json")
     publish_payload["instagramPassword"] = payload.instagramPassword.get_secret_value()
     body = _proxy_json(
@@ -659,14 +649,17 @@ def publish_instagram(
 
 @app.get("/stores")
 def list_stores(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
-    user_id = _get_user_id_from_auth(authorization)
-    if user_id is None:
-        raise api_error(401, "UNAUTHORIZED", "인증이 필요합니다.")
+    if is_backend_jwt(authorization):
+        selected_stores = STORES
+    else:
+        user_id = _get_user_id_from_auth(authorization)
+        if user_id is None:
+            raise api_error(401, "UNAUTHORIZED", "인증이 필요합니다.")
+        selected_stores = [store for store in STORES if store.get("owner_user_id") == user_id]
     fields = {"id", "name", "region", "industry", "timeZone", "closingTime", "createdAt", "updatedAt"}
     return [
         {key: value for key, value in store.items() if key in fields}
-        for store in STORES
-        if store.get("owner_user_id") == user_id
+        for store in selected_stores
     ]
 
 
@@ -674,9 +667,8 @@ def list_stores(authorization: str | None = Header(default=None)) -> list[dict[s
 def list_products(
     storeId: int,
     authorization: str | None = Header(default=None),
-    x_internal_api_key: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:
-    _require_store_access(storeId, authorization, x_internal_api_key)
+    _require_store_access(storeId, authorization)
     return PRODUCTS.get(storeId, [])
 
 
@@ -688,9 +680,8 @@ def list_sales_transactions(
     sortBy: str = "soldAt",
     sortDirection: str = "desc",
     authorization: str | None = Header(default=None),
-    x_internal_api_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_store_access(storeId, authorization, x_internal_api_key)
+    _require_store_access(storeId, authorization)
     allowed_sort_fields = {"soldAt", "createdAt", "saleId", "status"}
     if sortBy not in allowed_sort_fields:
         raise api_error(400, "INVALID_REQUEST", "지원하지 않는 정렬 필드입니다.")
@@ -776,7 +767,7 @@ def closing_sales_forecast(
         return _proxy_json(
             "GET",
             f"{settings.stats_service_url}/stores/{storeId}/dashboard/closing-sales-forecast",
-            headers={"X-Internal-Api-Key": settings.internal_api_key},
+            headers=backend_authorization_header(authorization),
         )
     except Exception as exc:
         if getattr(exc, "status_code", None) != 502:
@@ -802,7 +793,7 @@ def tomorrow_visitors_forecast(
         return _proxy_json(
             "GET",
             f"{settings.stats_service_url}/stores/{storeId}/dashboard/tomorrow-visitors-forecast",
-            headers={"X-Internal-Api-Key": settings.internal_api_key},
+            headers=backend_authorization_header(authorization),
         )
     except Exception as exc:
         if getattr(exc, "status_code", None) != 502:
@@ -819,9 +810,9 @@ def tomorrow_visitors_forecast(
 @app.post("/consultings", response_model=SaveConsultingResponse, status_code=201)
 def save_consulting(
     payload: SaveConsultingRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     store = _find_store(payload.storeId)
     if store is None or store.get("owner_user_id") != payload.userId:
         raise api_error(403, "STORE_ACCESS_DENIED", "해당 매장에 접근할 수 없습니다.")

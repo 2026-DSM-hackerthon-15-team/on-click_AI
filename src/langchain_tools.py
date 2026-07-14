@@ -152,12 +152,10 @@ def _json_get(url: str, *, headers: dict[str, str] | None = None, params: dict[s
 
 
 def _auth_headers(user_id: int) -> dict[str, str]:
-    if settings.backend_auth_token:
-        token = settings.backend_auth_token.strip()
-        if token.lower().startswith("bearer "):
-            token = token.split(" ", 1)[1].strip()
-        return {"Authorization": f"Bearer {token}"}
-    return {"Authorization": f"Bearer user-{user_id}"}
+    """Forward the JWT received for this AI request to backend tools."""
+    from src.auth import backend_authorization_header
+
+    return backend_authorization_header()
 
 
 def _store_context_from_list(store_id: int, user_id: int) -> ToolResult:

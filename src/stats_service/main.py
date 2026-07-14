@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import logging
 import time
 from datetime import date, datetime
@@ -11,6 +10,7 @@ import requests
 from fastapi import FastAPI, Header
 from pydantic import BaseModel, Field
 
+from src.auth import backend_authorization_header, require_backend_jwt
 from src.errors import api_error, install_error_handlers
 from src.observability import (
     install_browser_log_api,
@@ -37,15 +37,10 @@ class ForecastRequest(BaseModel):
     salesData: list[dict[str, Any]] = Field(default_factory=list)
 
 
-def _require_internal_key(value: str | None) -> None:
-    if not value or not hmac.compare_digest(value, settings.internal_api_key):
-        raise api_error(401, "INVALID_INTERNAL_API_KEY", "내부 API Key가 올바르지 않습니다.")
+install_browser_log_api(app, "stats-service", require_backend_jwt)
 
 
-install_browser_log_api(app, "stats-service", _require_internal_key)
-
-
-def _load_transactions(store_id: int) -> list[dict[str, Any]]:
+def _load_transactions(store_id: int, authorization: str | None = None) -> list[dict[str, Any]]:
     url = f"{settings.api_base_url}/stores/{store_id}/sales/transactions"
     target = safe_upstream_target(url)
     started = time.perf_counter()
@@ -61,7 +56,7 @@ def _load_transactions(store_id: int) -> list[dict[str, Any]]:
         response = requests.get(
             url,
             params={"page": 0, "size": 100, "sortBy": "soldAt", "sortDirection": "desc"},
-            headers=request_headers({"X-Internal-Api-Key": settings.internal_api_key}),
+            headers=request_headers(backend_authorization_header(authorization)),
             timeout=settings.request_timeout_seconds,
         )
     except requests.RequestException as exc:
@@ -148,9 +143,9 @@ def _load_transactions(store_id: int) -> list[dict[str, Any]]:
 @app.post("/forecast")
 def forecast(
     req: ForecastRequest,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     transactions = req.salesData or _load_transactions(req.storeId)
     now = datetime.now(KST).replace(tzinfo=None)
     closing = predict_closing_sales(transactions, now)
@@ -168,9 +163,9 @@ def forecast(
 @app.get("/stores/{storeId}/dashboard/closing-sales-forecast")
 def closing_sales_forecast(
     storeId: int,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     transactions = _load_transactions(storeId)
     now = datetime.now(KST).replace(tzinfo=None)
     result = predict_closing_sales(transactions, now)
@@ -187,9 +182,9 @@ def closing_sales_forecast(
 @app.get("/stores/{storeId}/dashboard/tomorrow-visitors-forecast")
 def tomorrow_visitors_forecast(
     storeId: int,
-    x_internal_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _require_internal_key(x_internal_api_key)
+    require_backend_jwt(authorization)
     transactions = _load_transactions(storeId)
     today = datetime.now(KST).date()
     result = predict_tomorrow_visitors(transactions, today)

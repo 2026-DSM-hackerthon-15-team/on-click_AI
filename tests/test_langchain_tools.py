@@ -4,35 +4,22 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from src.auth import require_backend_jwt
 from src.langchain_tools import _auth_headers, events_tool, get_langchain_tools, weather_tool
 
 
 class BackendAuthenticationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        require_backend_jwt("Bearer backend-request-jwt")
+
     def test_bound_langchain_tools_expose_no_model_arguments(self) -> None:
         tools = get_langchain_tools(store_id=10, user_id=1, allowed_tools=["sales_analysis"])
 
         self.assertEqual(1, len(tools))
         self.assertEqual({}, tools[0].args_schema.model_json_schema().get("properties"))
 
-    def test_configured_backend_jwt_is_used(self) -> None:
-        with patch(
-            "src.langchain_tools.settings",
-            SimpleNamespace(backend_auth_token="Bearer signed.jwt.value"),
-        ):
-            self.assertEqual(
-                {"Authorization": "Bearer signed.jwt.value"},
-                _auth_headers(user_id=4),
-            )
-
-    def test_local_demo_token_is_kept_without_backend_jwt(self) -> None:
-        with patch(
-            "src.langchain_tools.settings",
-            SimpleNamespace(backend_auth_token=None),
-        ):
-            self.assertEqual(
-                {"Authorization": "Bearer user-4"},
-                _auth_headers(user_id=4),
-            )
+    def test_request_jwt_is_forwarded(self) -> None:
+        self.assertEqual({"Authorization": "Bearer backend-request-jwt"}, _auth_headers(user_id=4))
 
     @patch("src.langchain_tools._json_get")
     def test_weather_uses_region_and_industry_from_store_list(self, json_get) -> None:
@@ -49,7 +36,6 @@ class BackendAuthenticationTests(unittest.TestCase):
         with patch(
             "src.langchain_tools.settings",
             SimpleNamespace(
-                backend_auth_token="signed.jwt.value",
                 api_base_url="https://backend.example.com",
                 mcp_service_url="http://mcp",
             ),
@@ -69,7 +55,6 @@ class BackendAuthenticationTests(unittest.TestCase):
         with patch(
             "src.langchain_tools.settings",
             SimpleNamespace(
-                backend_auth_token="signed.jwt.value",
                 api_base_url="https://backend.example.com",
                 mcp_service_url="http://mcp",
             ),
@@ -89,7 +74,6 @@ class BackendAuthenticationTests(unittest.TestCase):
         with patch(
             "src.langchain_tools.settings",
             SimpleNamespace(
-                backend_auth_token="signed.jwt.value",
                 api_base_url="https://backend.example.com",
                 mcp_service_url="http://mcp",
             ),
@@ -109,7 +93,6 @@ class BackendAuthenticationTests(unittest.TestCase):
         with patch(
             "src.langchain_tools.settings",
             SimpleNamespace(
-                backend_auth_token="signed.jwt.value",
                 api_base_url="https://backend.example.com",
                 mcp_service_url="http://mcp",
             ),
