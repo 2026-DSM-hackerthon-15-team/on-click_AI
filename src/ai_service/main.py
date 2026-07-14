@@ -41,12 +41,19 @@ from src.instagram import (
     publish_instagram as publish_instagram_post,
 )
 from src.langchain_tools import TOOL_DESCRIPTIONS, get_langchain_tools, get_tool_map
+from src.observability import (
+    install_observability,
+    log_event,
+    request_headers,
+    safe_upstream_target,
+)
 from src.settings import settings
 from src.stats_service.forecasting import predict_closing_sales, predict_tomorrow_visitors
 
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="ai-service")
+install_observability(app, "ai-service")
 install_error_handlers(app)
 
 
@@ -514,6 +521,8 @@ def _generated_text(value: Any) -> str:
 
 def _load_image_block(url: str) -> dict[str, str]:
     parsed = urlparse(url)
+    target = safe_upstream_target(url)
+    started = time.perf_counter()
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("INVALID_MARKETING_IMAGE_URL")
     try:
@@ -522,16 +531,25 @@ def _load_image_block(url: str) -> dict[str, str]:
             for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443)
         }
     except socket.gaierror as exc:
-        raise ValueError("MARKETING_IMAGE_UNAVAILABLE") from exc
+        raise ValueError("MARKETING_IMAGE_DNS_FAILED") from exc
     for address in addresses:
         ip = ipaddress.ip_address(address)
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            raise ValueError("INVALID_MARKETING_IMAGE_URL")
+            raise ValueError("MARKETING_IMAGE_URL_BLOCKED")
 
+    log_event(
+        logger,
+        logging.INFO,
+        "marketing.image_download.started",
+        upstreamService="MARKETING_IMAGE_HOST",
+        upstreamTarget=target,
+    )
     try:
         with requests.get(
             url,
-            headers={"User-Agent": "on-click-ai/1.0 (marketing-image-fetcher)"},
+            headers=request_headers(
+                {"User-Agent": "on-click-ai/1.0 (marketing-image-fetcher)"}
+            ),
             stream=True,
             allow_redirects=False,
             timeout=settings.request_timeout_seconds,
@@ -539,7 +557,7 @@ def _load_image_block(url: str) -> dict[str, str]:
             response.raise_for_status()
             mime_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
             if mime_type not in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
-                raise ValueError("INVALID_MARKETING_IMAGE_TYPE")
+                raise ValueError("MARKETING_IMAGE_TYPE_UNSUPPORTED")
             chunks: list[bytes] = []
             size = 0
             for chunk in response.iter_content(chunk_size=64 * 1024):
@@ -548,9 +566,37 @@ def _load_image_block(url: str) -> dict[str, str]:
                     raise ValueError("MARKETING_IMAGE_TOO_LARGE")
                 chunks.append(chunk)
     except requests.RequestException as exc:
-        raise ValueError("MARKETING_IMAGE_UNAVAILABLE") from exc
+        if isinstance(exc, requests.Timeout):
+            error_code = "MARKETING_IMAGE_DOWNLOAD_TIMEOUT"
+        elif isinstance(exc, requests.ConnectionError):
+            error_code = "MARKETING_IMAGE_CONNECTION_FAILED"
+        elif isinstance(exc, requests.HTTPError):
+            error_code = "MARKETING_IMAGE_HTTP_ERROR"
+        else:
+            error_code = "MARKETING_IMAGE_DOWNLOAD_FAILED"
+        log_event(
+            logger,
+            logging.ERROR,
+            "marketing.image_download.failed",
+            upstreamService="MARKETING_IMAGE_HOST",
+            upstreamTarget=target,
+            errorCode=error_code,
+            exceptionType=exc.__class__.__name__,
+            exc_info=True,
+        )
+        raise ValueError(error_code) from exc
     if not chunks:
-        raise ValueError("MARKETING_IMAGE_UNAVAILABLE")
+        raise ValueError("MARKETING_IMAGE_EMPTY")
+    log_event(
+        logger,
+        logging.INFO,
+        "marketing.image_download.completed",
+        upstreamService="MARKETING_IMAGE_HOST",
+        upstreamTarget=target,
+        contentType=mime_type,
+        bytesDownloaded=size,
+        latencyMs=round((time.perf_counter() - started) * 1000, 2),
+    )
     return {
         "type": "image",
         "base64": base64.b64encode(b"".join(chunks)).decode("ascii"),
@@ -706,10 +752,69 @@ def generate_marketing_copy(
     try:
         return _generate_marketing_copy(payload)
     except Exception as exc:
-        if isinstance(exc, TimeoutError) or "timeout" in exc.__class__.__name__.lower():
-            raise api_error(504, "AI_TIMEOUT", "마케팅 문구 생성 시간이 초과되었습니다.")
-        logger.exception("Marketing copy generation failed")
-        raise api_error(422, "MARKETING_COPY_GENERATION_FAILED", "마케팅 문구 생성에 실패했습니다.")
+        image_failures: dict[str, tuple[int, str, bool]] = {
+            "INVALID_MARKETING_IMAGE_URL": (422, "이미지 URL 형식이 올바르지 않습니다.", False),
+            "MARKETING_IMAGE_URL_BLOCKED": (422, "내부망 또는 허용되지 않은 이미지 URL입니다.", False),
+            "MARKETING_IMAGE_DNS_FAILED": (502, "이미지 호스트의 주소를 확인할 수 없습니다.", True),
+            "MARKETING_IMAGE_DOWNLOAD_TIMEOUT": (504, "이미지 다운로드 시간이 초과되었습니다.", True),
+            "MARKETING_IMAGE_CONNECTION_FAILED": (502, "이미지 호스트에 연결할 수 없습니다.", True),
+            "MARKETING_IMAGE_HTTP_ERROR": (502, "이미지 호스트가 오류 응답을 반환했습니다.", True),
+            "MARKETING_IMAGE_DOWNLOAD_FAILED": (502, "이미지를 다운로드하지 못했습니다.", True),
+            "MARKETING_IMAGE_TYPE_UNSUPPORTED": (422, "지원하지 않는 이미지 형식입니다.", False),
+            "MARKETING_IMAGE_TOO_LARGE": (413, "이미지는 파일당 5MB 이하여야 합니다.", False),
+            "MARKETING_IMAGE_EMPTY": (422, "빈 이미지 파일은 사용할 수 없습니다.", False),
+        }
+        reason_code = str(exc)
+        if isinstance(exc, ValueError) and reason_code in image_failures:
+            status_code, message, retryable = image_failures[reason_code]
+            raise api_error(
+                status_code,
+                reason_code,
+                message,
+                details={"imageCount": len(payload.imageUrls), "stage": "image_download"},
+                retryable=retryable,
+            )
+
+        exception_name = exc.__class__.__name__.lower()
+        if isinstance(exc, TimeoutError) or "timeout" in exception_name:
+            status_code, error_code, retryable = 504, "AI_PROVIDER_TIMEOUT", True
+            message = "AI 제공자 응답 시간이 초과되었습니다."
+        elif "authentication" in exception_name or "permission" in exception_name:
+            status_code, error_code, retryable = 502, "AI_PROVIDER_AUTHENTICATION_FAILED", False
+            message = "AI 제공자 인증에 실패했습니다. 서버 API Key 설정을 확인해 주세요."
+        elif "ratelimit" in exception_name or "rate_limit" in exception_name:
+            status_code, error_code, retryable = 503, "AI_PROVIDER_RATE_LIMITED", True
+            message = "AI 제공자 요청 한도를 초과했습니다. 잠시 후 다시 시도해 주세요."
+        elif "connection" in exception_name:
+            status_code, error_code, retryable = 502, "AI_PROVIDER_CONNECTION_FAILED", True
+            message = "AI 제공자에 연결할 수 없습니다."
+        elif "badrequest" in exception_name or "bad_request" in exception_name:
+            status_code, error_code, retryable = 422, "AI_PROVIDER_REJECTED_REQUEST", False
+            message = "AI 제공자가 마케팅 문구 요청을 처리하지 못했습니다."
+        else:
+            status_code, error_code, retryable = 422, "MARKETING_COPY_GENERATION_FAILED", False
+            message = "마케팅 문구 생성에 실패했습니다."
+        log_event(
+            logger,
+            logging.ERROR,
+            "marketing.copy.failed",
+            errorCode=error_code,
+            aiProvider=settings.ai_provider,
+            aiModel=settings.ai_model,
+            exceptionType=exc.__class__.__name__,
+            exc_info=True,
+        )
+        raise api_error(
+            status_code,
+            error_code,
+            message,
+            details={
+                "provider": settings.ai_provider,
+                "model": settings.ai_model,
+                "stage": "copy_generation",
+            },
+            retryable=retryable,
+        )
 
 
 @app.post(
@@ -734,14 +839,42 @@ def publish_instagram(
             raise api_error(409, "DUPLICATE_PUBLISH_REQUEST", "이미 처리된 게시 요청입니다.")
         raise
     except InstagramCredentialsInvalid:
-        raise api_error(422, "INSTAGRAM_CREDENTIALS_INVALID", "Instagram 로그인 정보가 올바르지 않습니다.")
+        raise api_error(
+            422,
+            "INSTAGRAM_CREDENTIALS_INVALID",
+            "Instagram 로그인 정보가 올바르지 않습니다.",
+            details={"stage": "instagram_login", "marketingId": marketingId},
+            retryable=False,
+        )
     except InstagramLoginChallengeRequired:
         raise api_error(
             422,
             "INSTAGRAM_LOGIN_CHALLENGE_REQUIRED",
             "Instagram 추가 인증 또는 사용자 확인이 필요합니다.",
+            details={"stage": "instagram_login", "marketingId": marketingId},
+            retryable=False,
         )
     except InstagramProviderTimeout:
-        raise api_error(504, "INSTAGRAM_PUBLISH_TIMEOUT", "Instagram 게시 시간이 초과되었습니다.")
-    except BrowserMCPUnavailable:
-        raise api_error(502, "BROWSER_MCP_UNAVAILABLE", "Browser MCP 게시 Tool 호출에 실패했습니다.")
+        raise api_error(
+            504,
+            "INSTAGRAM_PUBLISH_TIMEOUT",
+            "Instagram 게시 시간이 초과되었습니다.",
+            details={"stage": "browser_publish", "marketingId": marketingId},
+            retryable=True,
+        )
+    except BrowserMCPUnavailable as exc:
+        details = {
+            "stage": "browser_publish",
+            "marketingId": marketingId,
+            "reasonCode": exc.reason_code,
+        }
+        if exc.upstream_error_code:
+            details["upstreamErrorCode"] = exc.upstream_error_code
+        raise api_error(
+            502,
+            "BROWSER_MCP_UNAVAILABLE",
+            "Browser MCP 게시 Tool 호출에 실패했습니다.",
+            details=details,
+            retryable=exc.reason_code
+            not in {"BROWSER_MCP_NOT_CONFIGURED", "BROWSER_MCP_CLIENT_NOT_INSTALLED"},
+        )

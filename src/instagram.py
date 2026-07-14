@@ -5,11 +5,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
+from src.observability import log_event, safe_upstream_target
 from src.settings import settings
+
+
+logger = logging.getLogger("on_click.instagram")
 
 
 class InstagramCredentialsInvalid(Exception):
@@ -21,7 +27,15 @@ class InstagramLoginChallengeRequired(Exception):
 
 
 class BrowserMCPUnavailable(Exception):
-    pass
+    def __init__(
+        self,
+        reason_code: str = "BROWSER_MCP_UNAVAILABLE",
+        *,
+        upstream_error_code: str | None = None,
+    ) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+        self.upstream_error_code = upstream_error_code
 
 
 class InstagramProviderTimeout(Exception):
@@ -78,17 +92,22 @@ def _raise_browser_error(body: dict[str, Any]) -> None:
         raise InstagramCredentialsInvalid
     if error_code == "INSTAGRAM_LOGIN_CHALLENGE_REQUIRED":
         raise InstagramLoginChallengeRequired
-    raise BrowserMCPUnavailable
+    if not error_code:
+        raise BrowserMCPUnavailable("BROWSER_MCP_INVALID_RESPONSE")
+    raise BrowserMCPUnavailable(
+        "BROWSER_MCP_TOOL_FAILED", upstream_error_code=error_code
+    )
 
 
 async def _call_browser_mcp(payload: dict[str, Any]) -> dict[str, Any]:
     if not settings.browser_mcp_url:
-        raise BrowserMCPUnavailable
+        raise BrowserMCPUnavailable("BROWSER_MCP_NOT_CONFIGURED")
+    target = safe_upstream_target(settings.browser_mcp_url)
     try:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
     except ImportError as exc:
-        raise BrowserMCPUnavailable from exc
+        raise BrowserMCPUnavailable("BROWSER_MCP_CLIENT_NOT_INSTALLED") from exc
 
     arguments = {
         "username": payload["instagramUsername"],
@@ -97,6 +116,17 @@ async def _call_browser_mcp(payload: dict[str, Any]) -> dict[str, Any]:
         "hashtags": payload.get("hashtags", []),
         "imageUrls": payload["imageUrls"],
     }
+    started = time.perf_counter()
+    log_event(
+        logger,
+        logging.INFO,
+        "browser_mcp.request.started",
+        upstreamService="BROWSER_MCP",
+        upstreamTarget=target,
+        tool=settings.browser_mcp_tool,
+        imageCount=len(payload["imageUrls"]),
+        hashtagCount=len(payload.get("hashtags", [])),
+    )
     try:
         async with streamable_http_client(settings.browser_mcp_url) as (
             read_stream,
@@ -112,13 +142,40 @@ async def _call_browser_mcp(payload: dict[str, Any]) -> dict[str, Any]:
     except (InstagramCredentialsInvalid, InstagramLoginChallengeRequired):
         raise
     except Exception as exc:
-        raise BrowserMCPUnavailable from exc
+        exception_name = exc.__class__.__name__.lower()
+        reason_code = (
+            "BROWSER_MCP_CONNECTION_FAILED"
+            if any(word in exception_name for word in ("connect", "network", "socket"))
+            else "BROWSER_MCP_TOOL_CALL_FAILED"
+        )
+        log_event(
+            logger,
+            logging.ERROR,
+            "browser_mcp.request.failed",
+            upstreamService="BROWSER_MCP",
+            upstreamTarget=target,
+            tool=settings.browser_mcp_tool,
+            errorCode=reason_code,
+            exceptionType=exc.__class__.__name__,
+            exc_info=True,
+        )
+        raise BrowserMCPUnavailable(reason_code) from exc
 
     body = _tool_result_body(result)
     if getattr(result, "isError", False) or getattr(result, "is_error", False):
         _raise_browser_error(body)
     if body.get("status") != "PUBLISHED":
         _raise_browser_error(body)
+    log_event(
+        logger,
+        logging.INFO,
+        "browser_mcp.request.completed",
+        upstreamService="BROWSER_MCP",
+        upstreamTarget=target,
+        tool=settings.browser_mcp_tool,
+        latencyMs=round((time.perf_counter() - started) * 1000, 2),
+        status="PUBLISHED",
+    )
     return body
 
 
@@ -157,7 +214,7 @@ def publish_instagram(marketing_id: int, payload: dict[str, Any]) -> dict[str, A
             return _mock_publish(marketing_id, payload)
         if settings.instagram_provider == "browser_mcp":
             return _browser_publish(marketing_id, payload)
-        raise BrowserMCPUnavailable
+        raise BrowserMCPUnavailable("INSTAGRAM_PROVIDER_NOT_SUPPORTED")
     except Exception:
         with _registry_lock:
             _published_keys.discard(key)

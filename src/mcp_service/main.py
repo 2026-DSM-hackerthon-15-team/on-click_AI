@@ -1,7 +1,10 @@
 from fastapi import FastAPI, Query
 from datetime import datetime, timedelta
 
+from src.observability import install_observability
+
 app = FastAPI(title="mcp-service")
+install_observability(app, "mcp-service")
 
 
 @app.get("/weather")

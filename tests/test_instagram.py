@@ -104,6 +104,33 @@ class InstagramPublishingTests(unittest.TestCase):
             with self.assertRaises(BrowserMCPUnavailable):
                 publish_instagram(21, _payload("empty-browser-result"))
 
+    @patch("src.instagram._call_browser_mcp", new_callable=AsyncMock)
+    def test_browser_mcp_failure_response_includes_reason_code(
+        self, call_mcp: AsyncMock
+    ) -> None:
+        call_mcp.return_value = {}
+        fake_settings = SimpleNamespace(
+            instagram_provider="browser_mcp",
+            instagram_publish_timeout_seconds=30,
+        )
+        with patch("src.instagram.settings", fake_settings):
+            response = self.client.post(
+                "/ai/marketings/21/publish/instagram",
+                json=_payload("empty-browser-api-result"),
+                headers={
+                    "X-Internal-Api-Key": "secret",
+                    "X-Request-ID": "instagram-browser-failure",
+                },
+            )
+
+        self.assertEqual(502, response.status_code)
+        self.assertEqual("BROWSER_MCP_UNAVAILABLE", response.json()["errorCode"])
+        self.assertEqual(
+            "BROWSER_MCP_INVALID_RESPONSE",
+            response.json()["details"]["reasonCode"],
+        )
+        self.assertEqual("instagram-browser-failure", response.json()["requestId"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,7 +29,7 @@
 
 ```bash
 python -m pip install -r requirements.txt
-python src/main.py
+python -m src.main
 ```
 
 Docker Compose:
@@ -100,6 +100,22 @@ curl "http://localhost:8000/stores/10/dashboard/closing-sales-forecast" \
 python -m unittest discover -s tests -v
 python -m compileall -q src tests
 ```
+
+## 백엔드 연동 로그
+
+모든 서비스는 Docker 표준 출력에 JSON 로그를 남깁니다. 백엔드는 요청마다
+`X-Request-ID`를 보내는 것을 권장하며, AI 서버는 동일 값을 내부 AI·통계·MCP 호출과
+오류 응답에 전달합니다. 요청 본문, JWT, 내부 API Key, LLM API Key, Instagram
+비밀번호는 로그에 기록하지 않습니다.
+
+```bash
+docker compose logs -f --tail=200 app
+docker compose logs --since=30m app | grep '<requestId>'
+```
+
+로그 레벨과 출력 형식은 `.env`의 `LOG_LEVEL`, `LOG_FORMAT`으로 설정합니다. Docker
+로그는 파일당 10MB, 최대 5개로 순환됩니다. 오류 응답 필드와 전체 코드 목록은
+[`docs/ERROR_CODES.md`](docs/ERROR_CODES.md)를 확인하세요.
 
 실제 Claude API로 질문 4종과 일일 보고서를 다시 평가하려면 Compose 앱이 실행 중인 상태에서 다음 명령을 사용합니다. 이 평가는 로컬 계약 데이터를 사용하므로 원격 백엔드 JWT 상태와 무관합니다.
 

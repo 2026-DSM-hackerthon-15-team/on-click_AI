@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import math
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -24,13 +26,22 @@ from src.feature_contracts import (
     TomorrowVisitorsForecastRequest,
     TomorrowVisitorsForecastResponse,
 )
+from src.observability import (
+    install_observability,
+    log_event,
+    request_headers,
+    safe_upstream_target,
+    upstream_service_name,
+)
 from src.settings import settings
 from src.stats_service.forecasting import predict_closing_sales, predict_tomorrow_visitors
 
 
 app = FastAPI(title="on-click-api")
+install_observability(app, "api-gateway")
 install_error_handlers(app)
 KST = ZoneInfo("Asia/Seoul")
+logger = logging.getLogger("on_click.upstream")
 
 
 class AiChatRequest(BaseModel):
@@ -253,27 +264,169 @@ def _proxy_json(
     timeout_seconds: float | None = None,
     timeout_error_code: str = "UPSTREAM_SERVICE_TIMEOUT",
     timeout_message: str = "내부 서비스 응답 시간이 초과되었습니다.",
+    upstream_service: str | None = None,
     **kwargs: Any,
 ) -> Any:
+    service = upstream_service or upstream_service_name(url)
+    target = safe_upstream_target(url)
+    timeout = timeout_seconds or settings.request_timeout_seconds
+    kwargs["headers"] = request_headers(kwargs.get("headers"))
+    started = time.perf_counter()
+    log_event(
+        logger,
+        logging.INFO,
+        "upstream.request.started",
+        upstreamService=service,
+        upstreamTarget=target,
+        method=method,
+        timeoutSeconds=timeout,
+    )
     try:
         response = requests.request(
             method,
             url,
-            timeout=timeout_seconds or settings.request_timeout_seconds,
+            timeout=timeout,
             **kwargs,
         )
-    except requests.Timeout:
-        raise api_error(504, timeout_error_code, timeout_message)
+    except requests.ConnectTimeout:
+        log_event(
+            logger,
+            logging.ERROR,
+            "upstream.request.failed",
+            upstreamService=service,
+            upstreamTarget=target,
+            failureStage="connect",
+            errorType="ConnectTimeout",
+            exc_info=True,
+        )
+        raise api_error(
+            504,
+            f"{service}_CONNECT_TIMEOUT",
+            f"{service} 연결 시간이 초과되었습니다.",
+            details={"upstreamService": service, "target": target, "stage": "connect"},
+            retryable=True,
+        )
+    except (requests.ReadTimeout, requests.Timeout):
+        log_event(
+            logger,
+            logging.ERROR,
+            "upstream.request.failed",
+            upstreamService=service,
+            upstreamTarget=target,
+            failureStage="read",
+            errorType="ReadTimeout",
+            exc_info=True,
+        )
+        raise api_error(
+            504,
+            timeout_error_code,
+            timeout_message,
+            details={"upstreamService": service, "target": target, "stage": "read"},
+            retryable=True,
+        )
+    except requests.ConnectionError:
+        log_event(
+            logger,
+            logging.ERROR,
+            "upstream.request.failed",
+            upstreamService=service,
+            upstreamTarget=target,
+            failureStage="connect",
+            errorType="ConnectionError",
+            exc_info=True,
+        )
+        raise api_error(
+            502,
+            f"{service}_CONNECTION_FAILED",
+            f"{service}에 연결할 수 없습니다.",
+            details={"upstreamService": service, "target": target, "stage": "connect"},
+            retryable=True,
+        )
     except requests.RequestException as exc:
-        raise api_error(502, "UPSTREAM_SERVICE_UNAVAILABLE", f"내부 서비스 호출에 실패했습니다: {exc}")
+        log_event(
+            logger,
+            logging.ERROR,
+            "upstream.request.failed",
+            upstreamService=service,
+            upstreamTarget=target,
+            failureStage="request",
+            errorType=exc.__class__.__name__,
+            exc_info=True,
+        )
+        raise api_error(
+            502,
+            f"{service}_REQUEST_FAILED",
+            f"{service} 요청 처리 중 통신 오류가 발생했습니다.",
+            details={"upstreamService": service, "target": target, "stage": "request"},
+            retryable=True,
+        )
+    status_code = getattr(response, "status_code", 200 if response.ok else 502)
+    if not isinstance(status_code, int):
+        status_code = 200 if response.ok else 502
     try:
         body = response.json()
     except ValueError:
         body = None
     if not response.ok:
         if isinstance(body, dict) and body.get("errorCode"):
-            raise api_error(response.status_code, body["errorCode"], body.get("message", "요청에 실패했습니다."))
-        raise api_error(502, "UPSTREAM_INVALID_RESPONSE", "내부 서비스가 유효하지 않은 응답을 반환했습니다.")
+            details = dict(body.get("details") or {})
+            details.update(
+                {
+                    "upstreamService": service,
+                    "target": target,
+                    "upstreamStatus": status_code,
+                    "upstreamRequestId": body.get("requestId"),
+                }
+            )
+            log_event(
+                logger,
+                logging.WARNING if status_code < 500 else logging.ERROR,
+                "upstream.response.error",
+                upstreamService=service,
+                upstreamTarget=target,
+                upstreamStatus=status_code,
+                errorCode=body["errorCode"],
+                latencyMs=round((time.perf_counter() - started) * 1000, 2),
+            )
+            raise api_error(
+                status_code,
+                body["errorCode"],
+                body.get("message", "내부 서비스 요청에 실패했습니다."),
+                details=details,
+                retryable=body.get("retryable", status_code in {429, 502, 503, 504}),
+            )
+        raise api_error(
+            502,
+            f"{service}_HTTP_ERROR",
+            f"{service}가 오류 응답을 반환했습니다.",
+            details={
+                "upstreamService": service,
+                "target": target,
+                "upstreamStatus": status_code,
+            },
+            retryable=status_code >= 500,
+        )
+    if body is None:
+        raise api_error(
+            502,
+            f"{service}_INVALID_JSON_RESPONSE",
+            f"{service} 응답이 JSON 형식이 아닙니다.",
+            details={
+                "upstreamService": service,
+                "target": target,
+                "upstreamStatus": status_code,
+            },
+            retryable=False,
+        )
+    log_event(
+        logger,
+        logging.INFO,
+        "upstream.request.completed",
+        upstreamService=service,
+        upstreamTarget=target,
+        upstreamStatus=status_code,
+        latencyMs=round((time.perf_counter() - started) * 1000, 2),
+    )
     return body
 
 

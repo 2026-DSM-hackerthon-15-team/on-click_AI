@@ -17,9 +17,33 @@ class ApiContractTests(unittest.TestCase):
         cls.auth = {"Authorization": "Bearer user-1"}
 
     def test_error_body_uses_common_contract(self) -> None:
-        response = self.client.get("/stores")
+        response = self.client.get(
+            "/stores", headers={"X-Request-ID": "backend-integration-001"}
+        )
         self.assertEqual(401, response.status_code)
         self.assertEqual("UNAUTHORIZED", response.json()["errorCode"])
+        self.assertEqual("backend-integration-001", response.json()["requestId"])
+        self.assertEqual("backend-integration-001", response.headers["X-Request-ID"])
+        self.assertFalse(response.json()["retryable"])
+
+    def test_request_completion_log_contains_correlation_fields(self) -> None:
+        with self.assertLogs("on_click.http", level="INFO") as captured:
+            response = self.client.get(
+                "/stores",
+                headers={
+                    "Authorization": "Bearer user-1",
+                    "X-Request-ID": "backend-log-001",
+                },
+            )
+
+        self.assertEqual(200, response.status_code)
+        completed = next(
+            record for record in captured.records if record.event == "request.completed"
+        )
+        self.assertEqual("backend-log-001", completed.requestId)
+        self.assertEqual("GET", completed.method)
+        self.assertEqual("/stores", completed.path)
+        self.assertEqual(200, completed.statusCode)
 
     def test_store_list_exposes_region_and_industry_without_coordinates(self) -> None:
         response = self.client.get("/stores", headers=self.auth)
@@ -106,7 +130,10 @@ class ApiContractTests(unittest.TestCase):
         response = self.client.post(
             "/ai/chat",
             json=self._chat_payload(),
-            headers={"X-Internal-Api-Key": "secret"},
+            headers={
+                "X-Internal-Api-Key": "secret",
+                "X-Request-ID": "backend-chat-001",
+            },
         )
         self.assertEqual(200, response.status_code)
         proxied = request.call_args.kwargs["json"]
@@ -114,6 +141,10 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual([], proxied["attachmentKeys"])
         self.assertNotIn("conversationHistory", proxied)
         self.assertNotIn("storeContext", proxied)
+        self.assertEqual(
+            "backend-chat-001", request.call_args.kwargs["headers"]["X-Request-ID"]
+        )
+        self.assertEqual("backend-chat-001", response.headers["X-Request-ID"])
         self.assertEqual("SUCCESS", response.json()["usedTools"][0]["status"])
 
     def test_chat_missing_available_tools_uses_chat_error_code(self) -> None:
@@ -155,6 +186,48 @@ class ApiContractTests(unittest.TestCase):
         )
         self.assertEqual(504, response.status_code)
         self.assertEqual("AI_TIMEOUT", response.json()["errorCode"])
+        self.assertTrue(response.json()["retryable"])
+        self.assertEqual("AI_SERVICE", response.json()["details"]["upstreamService"])
+
+    @patch(
+        "src.api.main.requests.request",
+        side_effect=requests.ConnectionError("connection refused"),
+    )
+    def test_ai_connection_failure_has_diagnostic_code(self, _request: Mock) -> None:
+        response = self.client.post(
+            "/ai/chat",
+            json=self._chat_payload(),
+            headers={
+                "X-Internal-Api-Key": "secret",
+                "X-Request-ID": "backend-chat-connect-failure",
+            },
+        )
+
+        self.assertEqual(502, response.status_code)
+        self.assertEqual("AI_SERVICE_CONNECTION_FAILED", response.json()["errorCode"])
+        self.assertEqual("connect", response.json()["details"]["stage"])
+        self.assertTrue(response.json()["retryable"])
+        self.assertNotIn("connection refused", response.text)
+
+    def test_validation_error_never_echoes_instagram_password(self) -> None:
+        response = self.client.post(
+            "/ai/marketings/21/publish/instagram",
+            json={
+                "userId": 4,
+                "instagramUsername": "owner",
+                "instagramPassword": "leakme",
+                "content": "approved content",
+                "hashtags": [],
+                "imageUrls": ["https://cdn.example.com/image.jpg"],
+                "idempotencyKey": "password-redaction-test",
+            },
+            headers={"X-Internal-Api-Key": "secret"},
+        )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("INVALID_INSTAGRAM_POST", response.json()["errorCode"])
+        self.assertNotIn("leakme", response.text)
+        self.assertIn("body.instagramPassword", response.json()["errors"][0]["field"])
 
     def test_chat_openapi_matches_updated_dto(self) -> None:
         schema = self.client.get("/openapi.json").json()

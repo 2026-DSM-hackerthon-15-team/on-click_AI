@@ -4,16 +4,25 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta
+import logging
+import time
 from typing import Any, Callable
 
 import requests
 from pydantic import BaseModel, ConfigDict
 
+from src.observability import (
+    log_event,
+    request_headers,
+    safe_upstream_target,
+    upstream_service_name,
+)
 from src.settings import settings
 
 
 ToolResult = dict[str, Any]
 ToolFunction = Callable[..., ToolResult]
+logger = logging.getLogger("on_click.tools")
 
 
 class BoundToolInput(BaseModel):
@@ -37,15 +46,30 @@ def _ok(data: Any, **metadata: Any) -> ToolResult:
     return {"ok": True, "data": data, **metadata}
 
 
-def _failed(message: str, error_code: str = "TOOL_REQUEST_FAILED") -> ToolResult:
-    return {"ok": False, "error": message, "errorCode": error_code}
+def _failed(
+    message: str,
+    error_code: str = "TOOL_REQUEST_FAILED",
+    **metadata: Any,
+) -> ToolResult:
+    return {"ok": False, "error": message, "errorCode": error_code, **metadata}
 
 
 def _json_get(url: str, *, headers: dict[str, str] | None = None, params: dict[str, Any] | None = None) -> ToolResult:
+    service = upstream_service_name(url)
+    target = safe_upstream_target(url)
+    started = time.perf_counter()
+    log_event(
+        logger,
+        logging.INFO,
+        "tool.upstream.started",
+        upstreamService=service,
+        upstreamTarget=target,
+        method="GET",
+    )
     try:
         response = requests.get(
             url,
-            headers=headers,
+            headers=request_headers(headers),
             params=params,
             timeout=settings.request_timeout_seconds,
         )
@@ -53,11 +77,78 @@ def _json_get(url: str, *, headers: dict[str, str] | None = None, params: dict[s
             try:
                 body = response.json()
             except ValueError:
-                body = response.text
-            return _failed(f"HTTP {response.status_code}: {body}", "UPSTREAM_HTTP_ERROR")
-        return _ok(response.json())
-    except (requests.RequestException, ValueError) as exc:
-        return _failed(str(exc))
+                body = None
+            error_code = (
+                body.get("errorCode")
+                if isinstance(body, dict) and body.get("errorCode")
+                else f"{service}_HTTP_ERROR"
+            )
+            log_event(
+                logger,
+                logging.WARNING if response.status_code < 500 else logging.ERROR,
+                "tool.upstream.error",
+                upstreamService=service,
+                upstreamTarget=target,
+                upstreamStatus=response.status_code,
+                errorCode=error_code,
+                latencyMs=round((time.perf_counter() - started) * 1000, 2),
+            )
+            return _failed(
+                "연동 서비스가 오류 응답을 반환했습니다.",
+                error_code,
+                retryable=response.status_code >= 500,
+                details={
+                    "upstreamService": service,
+                    "target": target,
+                    "upstreamStatus": response.status_code,
+                    "upstreamRequestId": body.get("requestId") if isinstance(body, dict) else None,
+                },
+            )
+        try:
+            body = response.json()
+        except ValueError:
+            return _failed(
+                "연동 서비스 응답이 JSON 형식이 아닙니다.",
+                f"{service}_INVALID_JSON_RESPONSE",
+                retryable=False,
+                details={"upstreamService": service, "target": target},
+            )
+        log_event(
+            logger,
+            logging.INFO,
+            "tool.upstream.completed",
+            upstreamService=service,
+            upstreamTarget=target,
+            upstreamStatus=response.status_code,
+            latencyMs=round((time.perf_counter() - started) * 1000, 2),
+        )
+        return _ok(body)
+    except requests.RequestException as exc:
+        if isinstance(exc, requests.ConnectTimeout):
+            code, stage = f"{service}_CONNECT_TIMEOUT", "connect"
+        elif isinstance(exc, (requests.ReadTimeout, requests.Timeout)):
+            code, stage = f"{service}_TIMEOUT", "read"
+        elif isinstance(exc, requests.ConnectionError):
+            code, stage = f"{service}_CONNECTION_FAILED", "connect"
+        else:
+            code, stage = f"{service}_REQUEST_FAILED", "request"
+        log_event(
+            logger,
+            logging.ERROR,
+            "tool.upstream.failed",
+            upstreamService=service,
+            upstreamTarget=target,
+            errorCode=code,
+            failureStage=stage,
+            exceptionType=exc.__class__.__name__,
+            exc_info=True,
+        )
+        return _failed(
+            "연동 서비스와 통신하지 못했습니다.",
+            code,
+            retryable=True,
+            details={"upstreamService": service, "target": target, "stage": stage},
+        )
 
 
 def _auth_headers(user_id: int) -> dict[str, str]:
