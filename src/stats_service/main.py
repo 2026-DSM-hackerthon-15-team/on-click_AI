@@ -155,8 +155,12 @@ def forecast(
         "businessDate": now.date().isoformat(),
         "predictedSales": closing["forecastClosingSalesAmount"],
         "predictedVisitors": visitors["expectedVisitors"],
+        "observedSalesAmount": closing["observedSalesAmount"],
+        "forecastClosingSalesAmount": closing["forecastClosingSalesAmount"],
         "trend": "up" if closing["forecastClosingSalesAmount"] > closing["observedSalesAmount"] else "flat",
         "model": closing["model"],
+        "sampleDays": closing["sampleDays"],
+        "visitorSampleDays": visitors["sampleDays"],
     }
 
 

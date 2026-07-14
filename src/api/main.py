@@ -568,14 +568,29 @@ def forecast_closing_sales_ai(
     require_backend_jwt(authorization)
     body = _proxy_json(
         "POST",
-        f"{settings.ai_service_url}/ai/forecasts/closing-sales",
-        json=payload.model_dump(mode="json"),
+        f"{settings.stats_service_url}/forecast",
+        json={
+            "storeId": payload.storeId,
+            "salesData": payload.salesData,
+        },
         headers={"Authorization": authorization},
-        timeout_seconds=settings.ai_request_timeout_seconds,
+        timeout_seconds=settings.request_timeout_seconds,
+        upstream_service="stats-service",
     )
     try:
-        return ClosingSalesForecastResponse.model_validate(body)
-    except ValidationError:
+        return ClosingSalesForecastResponse.model_validate(
+            {
+                "storeId": body["storeId"],
+                "businessDate": body["businessDate"],
+                "currency": "KRW",
+                "observedSalesAmount": body["observedSalesAmount"],
+                "forecastClosingSalesAmount": body["forecastClosingSalesAmount"],
+                "model": body["model"],
+                "sampleDays": body["sampleDays"],
+                "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            }
+        )
+    except (ValidationError, KeyError):
         raise api_error(502, "FORECAST_EXECUTION_FAILED", "마감 매출 예측 응답이 올바르지 않습니다.")
 
 
@@ -587,14 +602,27 @@ def forecast_tomorrow_visitors_ai(
     require_backend_jwt(authorization)
     body = _proxy_json(
         "POST",
-        f"{settings.ai_service_url}/ai/forecasts/tomorrow-visitors",
-        json=payload.model_dump(mode="json"),
+        f"{settings.stats_service_url}/forecast",
+        json={
+            "storeId": payload.storeId,
+            "salesData": payload.salesData,
+        },
         headers={"Authorization": authorization},
-        timeout_seconds=settings.ai_request_timeout_seconds,
+        timeout_seconds=settings.request_timeout_seconds,
+        upstream_service="stats-service",
     )
     try:
-        return TomorrowVisitorsForecastResponse.model_validate(body)
-    except ValidationError:
+        return TomorrowVisitorsForecastResponse.model_validate(
+            {
+                "storeId": body["storeId"],
+                "targetDate": (payload.baseDate + timedelta(days=1)).isoformat(),
+                "expectedVisitors": body["predictedVisitors"],
+                "model": body["model"],
+                "sampleDays": body["visitorSampleDays"],
+                "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            }
+        )
+    except (ValidationError, KeyError):
         raise api_error(502, "FORECAST_EXECUTION_FAILED", "방문자 예측 응답이 올바르지 않습니다.")
 
 
