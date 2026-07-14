@@ -1,0 +1,570 @@
+from __future__ import annotations
+
+import hmac
+import json
+import logging
+import time
+from datetime import date
+from typing import Any, Literal
+
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
+from src.consulting import analyze_consulting
+from src.daily_consulting import (
+    generate_daily_consulting as build_daily_consulting,
+    render_daily_content,
+)
+from src.errors import api_error, install_error_handlers
+from src.feature_contracts import (
+    GenerateDailyConsultingRequest,
+    GenerateDailyConsultingResponse,
+    PublishInstagramRequest,
+    PublishInstagramResponse,
+)
+from src.instagram import (
+    InstagramAccountNotConnected,
+    InstagramProviderError,
+    InstagramProviderTimeout,
+    publish_instagram as publish_instagram_post,
+)
+from src.langchain_tools import TOOL_DESCRIPTIONS, get_langchain_tools, get_tool_map
+from src.settings import settings
+
+
+logger = logging.getLogger(__name__)
+app = FastAPI(title="ai-service")
+install_error_handlers(app)
+
+
+class AiChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    userId: int = Field(gt=0)
+    storeId: int = Field(gt=0)
+    chatRoomId: int = Field(gt=0)
+    message: str = Field(min_length=1)
+    availableTools: list[str]
+    attachmentKeys: list[str] = Field(default_factory=list)
+
+
+class AiToolExecutionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    toolName: str
+    status: Literal["SUCCESS", "FAILED", "SKIPPED"]
+    arguments: dict[str, Any] | None = None
+    resultSummary: str | None = None
+    latencyMs: int | None = None
+
+
+class AiCitationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    url: str
+    organization: str | None = None
+
+
+class AiChatResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answer: str = Field(min_length=1)
+    usedTools: list[AiToolExecutionResponse]
+    citations: list[AiCitationResponse] = Field(default_factory=list)
+    model: str = Field(min_length=1)
+    finishReason: Literal["STOP", "TOOL_ERROR", "MAX_TOKENS", "SAFETY"] = "STOP"
+
+
+class SalesDataPoint(BaseModel):
+    date: date
+    hour: int | None = Field(default=None, ge=0, le=23)
+    salesAmount: int = Field(ge=0)
+    orderCount: int = Field(ge=0)
+    averageOrderValue: float | None = Field(default=None, ge=0)
+
+
+class CostDataPoint(BaseModel):
+    date: date
+    category: str
+    amount: int = Field(ge=0)
+
+
+class ExternalContext(BaseModel):
+    weatherSummary: str | None = None
+    localEvents: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class GenerateConsultingRequest(BaseModel):
+    userId: int = Field(gt=0)
+    storeId: int = Field(gt=0)
+    periodType: Literal["MONTHLY", "QUARTERLY", "YEARLY", "CUSTOM"]
+    periodStart: date
+    periodEnd: date
+    comparisonPeriodStart: date | None = None
+    comparisonPeriodEnd: date | None = None
+    salesData: list[SalesDataPoint] = Field(min_length=1)
+    costData: list[CostDataPoint] = Field(default_factory=list)
+    externalContext: ExternalContext | None = None
+
+
+class ConsultingCauseResponse(BaseModel):
+    title: str
+    description: str
+    confidence: float = Field(ge=0, le=1)
+    evidence: list[str]
+
+
+class ConsultingRecommendationResponse(BaseModel):
+    priority: Literal["HIGH", "MEDIUM", "LOW"]
+    title: str
+    description: str
+    expectedEffect: str | None = None
+
+
+class ConsultingMetricResponse(BaseModel):
+    metricName: str
+    currentValue: float
+    previousValue: float | None = None
+    changeRate: float | None = None
+    unit: str
+
+
+class GenerateConsultingResponse(BaseModel):
+    title: str
+    periodType: str
+    periodStart: date
+    periodEnd: date
+    summary: str
+    estimatedCauses: list[ConsultingCauseResponse]
+    recommendations: list[ConsultingRecommendationResponse]
+    keyMetrics: list[ConsultingMetricResponse]
+    warnings: list[str] = Field(default_factory=list)
+    model: str
+
+
+class DailyConsultingNarrative(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1)
+    estimatedCauses: list[ConsultingCauseResponse]
+    recommendations: list[ConsultingRecommendationResponse]
+
+
+KEYWORD_TOOLS = {
+    "weather_search": ("날씨", "비", "기온", "강수", "weather"),
+    "event_search": ("행사", "축제", "이벤트", "event"),
+    "closing_sales_forecast": ("마감 매출", "오늘 예상 매출", "closing sales"),
+    "tomorrow_visitors_forecast": ("내일 방문", "내일 손님", "tomorrow visitor"),
+    "products": ("상품", "메뉴", "가격", "product"),
+    "pos_lookup": ("pos", "판매 기록", "거래 내역", "결제 기록"),
+    "sales_analysis": ("매출", "객단가", "주문 수", "왜 줄", "왜 늘", "sales"),
+}
+CHAT_READ_ONLY_TOOLS = frozenset(TOOL_DESCRIPTIONS)
+
+
+def _require_internal_key(value: str | None) -> None:
+    if not value or not hmac.compare_digest(value, settings.internal_api_key):
+        raise api_error(401, "INVALID_INTERNAL_API_KEY", "내부 API Key가 올바르지 않습니다.")
+
+
+def _allowed_tools(payload: AiChatRequest) -> list[str]:
+    return [name for name in payload.availableTools if name in CHAT_READ_ONLY_TOOLS]
+
+
+def _summary(value: Any, limit: int = 500) -> str:
+    rendered = json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
+    return rendered if len(rendered) <= limit else rendered[: limit - 1] + "…"
+
+
+def _extract_citations(result: Any) -> list[AiCitationResponse]:
+    found: list[AiCitationResponse] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            url = value.get("sourceUrl") or value.get("url")
+            title = value.get("sourceTitle") or value.get("title")
+            if url and title and str(url).startswith(("http://", "https://")):
+                candidate = AiCitationResponse(
+                    title=str(title),
+                    url=str(url),
+                    organization=value.get("organization"),
+                )
+                if all(existing.url != candidate.url for existing in found):
+                    found.append(candidate)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(result)
+    return found
+
+
+def _fallback_tool_selection(payload: AiChatRequest, allowed: list[str]) -> list[str]:
+    text = payload.message.lower()
+    selected = [
+        name
+        for name in allowed
+        if any(keyword in text for keyword in KEYWORD_TOOLS.get(name, ()))
+    ]
+    # A POS lookup is redundant when sales_analysis already loads the same ledger.
+    if "sales_analysis" in selected and "pos_lookup" in selected:
+        selected.remove("pos_lookup")
+    return selected
+
+
+def _answer_from_results(message: str, invoked: list[tuple[str, dict[str, Any]]]) -> str:
+    successful = [(name, result.get("data")) for name, result in invoked if result.get("ok")]
+    if not invoked:
+        if any(keyword in message.lower() for keyword in ("컨설팅", "보고서", "저장", "게시", "업로드")):
+            return (
+                "채팅에서는 요청에 대한 설명과 분석 답변만 제공하며 컨설팅 저장이나 게시를 실행하지 않습니다. "
+                "궁금한 매출·운영 내용을 질문하면 사용 가능한 데이터를 근거로 답변하겠습니다."
+            )
+        return "매장 운영, 매출, 날씨, 행사, 상품 또는 방문자 예측에 대해 질문해 주세요."
+    if not successful:
+        return "필요한 데이터를 조회하지 못했습니다. 잠시 후 다시 시도해 주세요."
+
+    sentences = []
+    for name, data in successful:
+        if name == "sales_analysis" and isinstance(data, dict):
+            change = data.get("salesChangeRate")
+            change_text = "비교 데이터 없음" if change is None else f"직전 7일 대비 {change:+.1f}%"
+            sentences.append(
+                f"최근 매출은 {int(data.get('totalSales', 0)):,}원이며 {change_text}입니다. "
+                f"주문은 {data.get('orderCount', 0)}건입니다."
+            )
+        elif name == "closing_sales_forecast" and isinstance(data, dict):
+            sentences.append(
+                f"현재 {int(data.get('observedSalesAmount', 0)):,}원, 마감 예상 매출은 "
+                f"{int(data.get('forecastClosingSalesAmount', 0)):,}원입니다."
+            )
+        elif name == "tomorrow_visitors_forecast" and isinstance(data, dict):
+            sentences.append(f"내일 예상 방문자는 {data.get('expectedVisitors', 0)}명입니다.")
+        elif name == "weather_search" and isinstance(data, dict):
+            sentences.append(
+                f"날씨는 {data.get('summary', '정보 없음')}, 기온 {data.get('temperature', '?')}℃, "
+                f"강수확률 {data.get('pop', '?')}%입니다."
+            )
+        elif name == "event_search" and isinstance(data, dict):
+            names = [event.get("name") for event in data.get("events", []) if event.get("name")]
+            sentences.append("주변 행사: " + (", ".join(names) if names else "예정된 행사가 없습니다."))
+        elif name == "products" and isinstance(data, list):
+            names = [str(item.get("name")) for item in data[:5]]
+            sentences.append("현재 상품: " + ", ".join(names))
+        else:
+            sentences.append(f"{name} 조회 결과: {_summary(data, 220)}")
+    return " ".join(sentences)
+
+
+def _run_rule_agent(payload: AiChatRequest, allowed: list[str]) -> AiChatResponse:
+    tool_map = get_tool_map(
+        user_id=payload.userId,
+        store_id=payload.storeId,
+    )
+    selected = _fallback_tool_selection(payload, allowed)
+    executions: list[AiToolExecutionResponse] = []
+    invoked: list[tuple[str, dict[str, Any]]] = []
+    citations: list[AiCitationResponse] = []
+    for name in selected:
+        started = time.perf_counter()
+        try:
+            result = tool_map[name]()
+        except Exception as exc:  # tool boundary must not crash the agent
+            logger.exception("Tool %s failed", name)
+            result = {"ok": False, "error": str(exc)}
+        elapsed = int((time.perf_counter() - started) * 1000)
+        invoked.append((name, result))
+        executions.append(
+            AiToolExecutionResponse(
+                toolName=name,
+                status="SUCCESS" if result.get("ok") else "FAILED",
+                arguments={"storeId": payload.storeId},
+                resultSummary=_summary(result),
+                latencyMs=elapsed,
+            )
+        )
+        citations.extend(_extract_citations(result))
+    if invoked and not any(result.get("ok") for _, result in invoked):
+        raise api_error(502, "TOOL_EXECUTION_ERROR", "필수 Tool 실행에 실패했습니다.")
+    finish_reason = "TOOL_ERROR" if any(not result.get("ok") for _, result in invoked) else "STOP"
+    return AiChatResponse(
+        answer=_answer_from_results(payload.message, invoked),
+        usedTools=executions,
+        citations=citations,
+        model="rule-agent-v1",
+        finishReason=finish_reason,
+    )
+
+
+def _build_langchain_model() -> Any | None:
+    if not settings.ai_api_key:
+        return None
+    llm_kwargs: dict[str, Any] = {
+        "model": settings.ai_model,
+        "api_key": settings.ai_api_key,
+        "temperature": 0,
+        "timeout": settings.ai_request_timeout_seconds,
+    }
+    if settings.ai_provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        llm_kwargs["max_tokens"] = 2048
+        return ChatAnthropic(**llm_kwargs)
+    if settings.ai_provider == "openai":
+        from langchain_openai import ChatOpenAI
+
+        if settings.ai_base_url:
+            llm_kwargs["base_url"] = settings.ai_base_url
+        return ChatOpenAI(**llm_kwargs)
+    logger.warning("Unsupported AI provider: %s", settings.ai_provider)
+    return None
+
+
+def _run_langchain_agent(payload: AiChatRequest, allowed: list[str]) -> AiChatResponse | None:
+    if not settings.ai_api_key:
+        return None
+    try:
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+        tools = get_langchain_tools(
+            user_id=payload.userId,
+            store_id=payload.storeId,
+            allowed_tools=allowed,
+        )
+        tool_map = {tool.name: tool for tool in tools}
+        llm = _build_langchain_model()
+        if llm is None:
+            return None
+        model = llm.bind_tools(tools) if tools else llm
+
+        messages: list[Any] = [
+            SystemMessage(
+                content=(
+                    "당신은 ON:CLICK 소상공인 매장 운영 에이전트입니다. 수치가 필요한 질문은 반드시 제공된 도구를 사용하고, "
+                    "도구 결과와 관측 사실을 구분하며, 추측을 사실처럼 말하지 마세요. 답변은 한국어로 간결하게 작성하세요. "
+                    "채팅에서는 질문에 답변만 하며 컨설팅 생성·저장, 마케팅 생성·승인, Instagram 게시를 절대 실행하지 마세요."
+                )
+            )
+        ]
+        messages.append(HumanMessage(content=payload.message))
+
+        executions: list[AiToolExecutionResponse] = []
+        citations: list[AiCitationResponse] = []
+        for _ in range(4):
+            ai_message = model.invoke(messages)
+            messages.append(ai_message)
+            tool_calls = getattr(ai_message, "tool_calls", []) or []
+            if not tool_calls:
+                content = ai_message.content
+                if isinstance(content, list):
+                    content = " ".join(str(block.get("text", block)) if isinstance(block, dict) else str(block) for block in content)
+                answer = str(content).strip()
+                if not answer:
+                    raise api_error(422, "AI_RESPONSE_INVALID", "AI가 유효한 응답을 생성하지 못했습니다.")
+                if executions and all(execution.status == "FAILED" for execution in executions):
+                    raise api_error(502, "TOOL_EXECUTION_ERROR", "필수 Tool 실행에 실패했습니다.")
+                finish_reason = "TOOL_ERROR" if any(execution.status == "FAILED" for execution in executions) else "STOP"
+                return AiChatResponse(
+                    answer=answer,
+                    usedTools=executions,
+                    citations=citations,
+                    model=settings.ai_model,
+                    finishReason=finish_reason,
+                )
+            for call in tool_calls:
+                name = call.get("name")
+                arguments = call.get("args") or {}
+                started = time.perf_counter()
+                try:
+                    result = tool_map[name].invoke(arguments)
+                except Exception as exc:
+                    result = {"ok": False, "error": str(exc)}
+                elapsed = int((time.perf_counter() - started) * 1000)
+                executions.append(
+                    AiToolExecutionResponse(
+                        toolName=name,
+                        status="SUCCESS" if result.get("ok") else "FAILED",
+                        arguments=arguments,
+                        resultSummary=_summary(result),
+                        latencyMs=elapsed,
+                    )
+                )
+                citations.extend(_extract_citations(result))
+                messages.append(
+                    ToolMessage(
+                        content=_summary(result, 4000),
+                        tool_call_id=call["id"],
+                    )
+                )
+        return AiChatResponse(
+            answer="도구 호출 횟수 제한에 도달했습니다.",
+            usedTools=executions,
+            citations=citations,
+            model=settings.ai_model,
+            finishReason="MAX_TOKENS",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if isinstance(exc, TimeoutError) or "timeout" in exc.__class__.__name__.lower():
+            raise api_error(504, "AI_TIMEOUT", "AI 처리 시간이 초과되었습니다.")
+        logger.exception("LangChain agent failed; falling back to the local agent")
+        return None
+
+
+def _handle_chat(payload: AiChatRequest, api_key: str | None) -> AiChatResponse:
+    _require_internal_key(api_key)
+    allowed = _allowed_tools(payload)
+    return _run_langchain_agent(payload, allowed) or _run_rule_agent(payload, allowed)
+
+
+def _write_daily_report_with_llm(report: dict[str, Any]) -> dict[str, Any]:
+    llm = _build_langchain_model()
+    if llm is None:
+        return report
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    evidence = {
+        "targetDate": str(report["targetDate"]),
+        "chatInsights": report["chatInsights"],
+        "keyMetrics": report["keyMetrics"],
+        "externalFactors": report["externalFactors"],
+        "warnings": report["warnings"],
+    }
+    started = time.perf_counter()
+    try:
+        writer = llm.with_structured_output(DailyConsultingNarrative)
+        narrative = writer.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "당신은 ON:CLICK 소상공인 일일 컨설팅 보고서 작성자입니다. 제공된 evidence만 사용하고, "
+                        "존재하지 않는 수치·행사·원인을 만들지 마세요. summary는 2~4문장, 원인은 근거와 confidence를 포함하고, "
+                        "추천은 내일 바로 실행 가능한 행동으로 작성하세요. FORECAST_CLOSING_TOTAL_SALES는 추가 매출이 아니라 "
+                        "오늘의 최종 마감 예상 총액이고, TOMORROW_EXPECTED_VISITORS는 내일 방문자 예측입니다. 행사 날짜가 "
+                        "targetDate와 다르면 오늘 행사라고 표현하지 마세요. RECENT_7D 지표는 오늘 하루가 아니라 최근 7일과 "
+                        "직전 7일의 비교입니다. 미래 예측값은 과거 매출 감소의 원인으로 사용하지 말고 추천 계획에만 사용하세요. "
+                        "모든 문장은 자연스러운 한국어로 작성하세요."
+                    )
+                ),
+                HumanMessage(content=json.dumps(evidence, ensure_ascii=False, default=str)),
+            ]
+        )
+        if isinstance(narrative, dict):
+            narrative = DailyConsultingNarrative.model_validate(narrative)
+        report["summary"] = narrative.summary
+        report["estimatedCauses"] = [
+            item.model_dump(mode="json") for item in narrative.estimatedCauses
+        ]
+        report["recommendations"] = [
+            item.model_dump(mode="json") for item in narrative.recommendations
+        ]
+        report["model"] = settings.ai_model
+        report["usedTools"].append(
+            {
+                "toolName": "claude_report_writer",
+                "status": "SUCCESS",
+                "arguments": {"model": settings.ai_model},
+                "resultSummary": "근거 기반 일일 보고서 서술 생성 완료",
+                "latencyMs": int((time.perf_counter() - started) * 1000),
+            }
+        )
+    except Exception as exc:
+        logger.exception("Daily report LLM writer failed; using deterministic report")
+        report["warnings"].append("Claude 보고서 서술 생성에 실패해 규칙 기반 보고서를 사용했습니다.")
+        report["usedTools"].append(
+            {
+                "toolName": "claude_report_writer",
+                "status": "FAILED",
+                "arguments": {"model": settings.ai_model},
+                "resultSummary": str(exc)[:500],
+                "latencyMs": int((time.perf_counter() - started) * 1000),
+            }
+        )
+    report["content"] = render_daily_content(report)
+    return report
+
+
+@app.post("/ai/chat", response_model=AiChatResponse)
+def ai_chat(
+    payload: AiChatRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> AiChatResponse:
+    return _handle_chat(payload, x_internal_api_key)
+
+
+@app.post("/run_agent", response_model=AiChatResponse, include_in_schema=False)
+def run_agent(
+    payload: AiChatRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> AiChatResponse:
+    return _handle_chat(payload, x_internal_api_key)
+
+
+@app.post("/ai/consultings", response_model=GenerateConsultingResponse)
+def generate_consulting(
+    payload: GenerateConsultingRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_internal_key(x_internal_api_key)
+    try:
+        return analyze_consulting(payload.model_dump(mode="json"))
+    except ValueError as exc:
+        error_code = str(exc)
+        if error_code == "INVALID_ANALYSIS_PERIOD":
+            raise api_error(400, error_code, "분석 기간이 올바르지 않습니다.")
+        if error_code == "INSUFFICIENT_SALES_DATA":
+            raise api_error(422, error_code, "분석할 매출 데이터가 부족합니다.")
+        raise api_error(422, "CONSULTING_GENERATION_FAILED", "컨설팅 결과 생성에 실패했습니다.")
+
+
+@app.post("/ai/consultings/daily", response_model=GenerateDailyConsultingResponse)
+def generate_daily_consulting(
+    payload: GenerateDailyConsultingRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_internal_key(x_internal_api_key)
+    try:
+        report = build_daily_consulting(payload.model_dump(mode="json"))
+        return _write_daily_report_with_llm(report)
+    except ValueError as exc:
+        if str(exc) == "STORE_OR_CHAT_CONTEXT_NOT_FOUND":
+            raise api_error(404, str(exc), "대상 매장 또는 필요한 대화 문맥을 찾을 수 없습니다.")
+        raise api_error(422, "DAILY_CONSULTING_GENERATION_FAILED", "일일 보고서 생성에 실패했습니다.")
+    except RuntimeError as exc:
+        if str(exc) == "TOOL_EXECUTION_ERROR":
+            raise api_error(502, str(exc), "보고서 필수 데이터 Tool 실행에 실패했습니다.")
+        raise api_error(422, "DAILY_CONSULTING_GENERATION_FAILED", "일일 보고서 생성에 실패했습니다.")
+
+
+@app.post(
+    "/ai/marketings/{marketingId}/publish/instagram",
+    response_model=PublishInstagramResponse,
+)
+def publish_instagram(
+    marketingId: int,
+    payload: PublishInstagramRequest,
+    x_internal_api_key: str | None = Header(default=None),
+    x_instagram_access_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_internal_key(x_internal_api_key)
+    try:
+        return publish_instagram_post(
+            marketingId,
+            payload.model_dump(mode="json"),
+            access_token=x_instagram_access_token,
+        )
+    except KeyError as exc:
+        if exc.args and exc.args[0] == "DUPLICATE_PUBLISH_REQUEST":
+            raise api_error(409, "DUPLICATE_PUBLISH_REQUEST", "이미 처리된 게시 요청입니다.")
+        raise
+    except InstagramAccountNotConnected:
+        raise api_error(422, "INSTAGRAM_ACCOUNT_NOT_CONNECTED", "Instagram 계정 인증 정보가 없습니다.")
+    except InstagramProviderTimeout:
+        raise api_error(504, "INSTAGRAM_PUBLISH_TIMEOUT", "Instagram 게시 시간이 초과되었습니다.")
+    except InstagramProviderError:
+        raise api_error(502, "INSTAGRAM_PROVIDER_ERROR", "Instagram 게시 Provider 호출에 실패했습니다.")

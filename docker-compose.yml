@@ -1,0 +1,30 @@
+services:
+  app:
+    image: python:3.10-slim
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: bash -c "python -m pip install --no-cache-dir -r requirements.txt && python src/main.py"
+    environment:
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-secret}
+      BACKEND_AUTH_TOKEN: ${BACKEND_AUTH_TOKEN:-}
+      API_BASE_URL: ${API_BASE_URL:-http://127.0.0.1:8000}
+      AI_SERVICE_URL: http://127.0.0.1:8001
+      MCP_SERVICE_URL: http://127.0.0.1:8002
+      STATS_SERVICE_URL: http://127.0.0.1:8003
+      AI_PROVIDER: ${AI_PROVIDER:-anthropic}
+      AI_API_KEY: ${AI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-claude-sonnet-4-6}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_REQUEST_TIMEOUT_SECONDS: ${AI_REQUEST_TIMEOUT_SECONDS:-45}
+      INSTAGRAM_PROVIDER: ${INSTAGRAM_PROVIDER:-mock}
+      INSTAGRAM_GRAPH_BASE_URL: ${INSTAGRAM_GRAPH_BASE_URL:-https://graph.facebook.com}
+      INSTAGRAM_GRAPH_API_VERSION: ${INSTAGRAM_GRAPH_API_VERSION:-v23.0}
+      INSTAGRAM_PUBLISH_TIMEOUT_SECONDS: ${INSTAGRAM_PUBLISH_TIMEOUT_SECONDS:-30}
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+      - "8003:8003"
