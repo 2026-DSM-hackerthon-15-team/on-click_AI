@@ -114,7 +114,7 @@ async def _call_browser_mcp(payload: dict[str, Any]) -> dict[str, Any]:
         "password": payload["instagramPassword"],
         "content": payload["content"],
         "hashtags": payload.get("hashtags", []),
-        "imageUrls": payload["imageUrls"],
+        "images": payload.get("images", []),
     }
     started = time.perf_counter()
     log_event(
@@ -202,26 +202,27 @@ def _browser_publish(marketing_id: int, payload: dict[str, Any]) -> dict[str, An
     }
 
 
-def _download_images_to_temp(image_urls: list[str]) -> list[str]:
-    import requests
-    import tempfile
+def _write_images_to_temp(images: list[dict[str, Any]]) -> list[str]:
+    import base64
     import os
+    import tempfile
 
     paths: list[str] = []
-    for url in image_urls:
-        resp = requests.get(url, stream=True, timeout=10)
-        resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
-        ext = ".jpg"
+    for image in images:
+        content_type = str(image.get("contentType", "image/jpeg")).split(";", 1)[0].lower()
+        filename = str(image.get("filename", "image.jpg"))
+        suffix = ".jpg"
         if content_type == "image/png":
-            ext = ".png"
+            suffix = ".png"
         elif content_type == "image/webp":
-            ext = ".webp"
-        f = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            suffix = ".webp"
+        payload = image.get("content")
+        if not isinstance(payload, str) or not payload:
+            raise ValueError("image content is required")
+        raw_bytes = base64.b64decode(payload)
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         try:
-            for chunk in resp.iter_content(64 * 1024):
-                if chunk:
-                    f.write(chunk)
+            f.write(raw_bytes)
             f.flush()
         finally:
             f.close()
@@ -239,7 +240,7 @@ def _instagrapi_publish(marketing_id: int, payload: dict[str, Any]) -> dict[str,
 
     username = payload["instagramUsername"]
     password = payload["instagramPassword"]
-    image_urls = payload["imageUrls"]
+    images = payload.get("images", [])
     caption = payload.get("content", "") + " " + " ".join(payload.get("hashtags", []))
 
     started = time.perf_counter()
@@ -248,13 +249,13 @@ def _instagrapi_publish(marketing_id: int, payload: dict[str, Any]) -> dict[str,
         logging.INFO,
         "instagrapi.publish.started",
         upstreamService="INSTAGRAPI",
-        imageCount=len(image_urls),
+        imageCount=len(images),
     )
 
     temp_paths: list[str] = []
     client = None
     try:
-        temp_paths = _download_images_to_temp(image_urls)
+        temp_paths = _write_images_to_temp(images)
         client = Client()
         client.login(username, password)
 

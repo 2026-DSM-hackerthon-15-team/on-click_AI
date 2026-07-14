@@ -135,13 +135,23 @@ class PublishInstagramRequest(StrictModel):
     instagramPassword: SecretStr = Field(min_length=8, max_length=200)
     content: str = Field(min_length=1, max_length=2200)
     hashtags: list[str] = Field(default_factory=list, max_length=30)
-    imageUrls: list[str] = Field(min_length=1, max_length=10)
+    images: list[dict[str, Any]] = Field(min_length=1, max_length=10)
     idempotencyKey: str = Field(min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def validate_instagram_shape(self) -> "PublishInstagramRequest":
-        if any(not url.startswith("https://") for url in self.imageUrls):
-            raise ValueError("imageUrls must use HTTPS")
+        for image in self.images:
+            if not isinstance(image, dict):
+                raise ValueError("each image entry must be an object")
+            filename = image.get("filename")
+            content = image.get("content")
+            content_type = image.get("contentType")
+            if not isinstance(filename, str) or not filename.strip():
+                raise ValueError("image filename is required")
+            if not isinstance(content_type, str) or not content_type.strip():
+                raise ValueError("image contentType is required")
+            if not isinstance(content, str) or not content:
+                raise ValueError("image content is required")
         return self
 
 
