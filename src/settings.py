@@ -64,10 +64,8 @@ class Settings:
     request_timeout_seconds: float = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
     ai_request_timeout_seconds: float = float(os.getenv("AI_REQUEST_TIMEOUT_SECONDS", "45"))
     instagram_provider: str = os.getenv("INSTAGRAM_PROVIDER", "mock").lower()
-    instagram_graph_base_url: str = os.getenv(
-        "INSTAGRAM_GRAPH_BASE_URL", "https://graph.facebook.com"
-    ).rstrip("/")
-    instagram_graph_api_version: str = os.getenv("INSTAGRAM_GRAPH_API_VERSION", "v23.0")
+    browser_mcp_url: str | None = os.getenv("BROWSER_MCP_URL")
+    browser_mcp_tool: str = os.getenv("BROWSER_MCP_TOOL", "instagram_publish")
     instagram_publish_timeout_seconds: float = float(
         os.getenv("INSTAGRAM_PUBLISH_TIMEOUT_SECONDS", "30")
     )

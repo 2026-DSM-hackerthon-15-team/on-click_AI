@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import hmac
+import base64
+import ipaddress
 import json
 import logging
+import socket
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Literal
+from urllib.parse import urlparse
 
+import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,19 +22,27 @@ from src.daily_consulting import (
 )
 from src.errors import api_error, install_error_handlers
 from src.feature_contracts import (
+    ClosingSalesForecastRequest,
+    ClosingSalesForecastResponse,
+    GenerateMarketingCopyRequest,
+    GenerateMarketingCopyResponse,
     GenerateDailyConsultingRequest,
     GenerateDailyConsultingResponse,
     PublishInstagramRequest,
     PublishInstagramResponse,
+    TomorrowVisitorsForecastRequest,
+    TomorrowVisitorsForecastResponse,
 )
 from src.instagram import (
-    InstagramAccountNotConnected,
-    InstagramProviderError,
+    BrowserMCPUnavailable,
+    InstagramCredentialsInvalid,
+    InstagramLoginChallengeRequired,
     InstagramProviderTimeout,
     publish_instagram as publish_instagram_post,
 )
 from src.langchain_tools import TOOL_DESCRIPTIONS, get_langchain_tools, get_tool_map
 from src.settings import settings
+from src.stats_service.forecasting import predict_closing_sales, predict_tomorrow_visitors
 
 
 logger = logging.getLogger(__name__)
@@ -489,6 +502,100 @@ def _write_daily_report_with_llm(report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _generated_text(value: Any) -> str:
+    content = getattr(value, "content", value)
+    if isinstance(content, list):
+        content = " ".join(
+            str(block.get("text", "")) if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    return str(content).strip()
+
+
+def _load_image_block(url: str) -> dict[str, str]:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("INVALID_MARKETING_IMAGE_URL")
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443)
+        }
+    except socket.gaierror as exc:
+        raise ValueError("MARKETING_IMAGE_UNAVAILABLE") from exc
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise ValueError("INVALID_MARKETING_IMAGE_URL")
+
+    try:
+        with requests.get(
+            url,
+            headers={"User-Agent": "on-click-ai/1.0 (marketing-image-fetcher)"},
+            stream=True,
+            allow_redirects=False,
+            timeout=settings.request_timeout_seconds,
+        ) as response:
+            response.raise_for_status()
+            mime_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+            if mime_type not in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
+                raise ValueError("INVALID_MARKETING_IMAGE_TYPE")
+            chunks: list[bytes] = []
+            size = 0
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                size += len(chunk)
+                if size > 5 * 1024 * 1024:
+                    raise ValueError("MARKETING_IMAGE_TOO_LARGE")
+                chunks.append(chunk)
+    except requests.RequestException as exc:
+        raise ValueError("MARKETING_IMAGE_UNAVAILABLE") from exc
+    if not chunks:
+        raise ValueError("MARKETING_IMAGE_UNAVAILABLE")
+    return {
+        "type": "image",
+        "base64": base64.b64encode(b"".join(chunks)).decode("ascii"),
+        "mime_type": mime_type,
+    }
+
+
+def _generate_marketing_copy(payload: GenerateMarketingCopyRequest) -> GenerateMarketingCopyResponse:
+    tags = [tag if tag.startswith("#") else f"#{tag}" for tag in payload.tags]
+    llm = _build_langchain_model()
+    if llm is None:
+        fallback = "\n\n".join(part for part in [payload.draftText, " ".join(tags)] if part)
+        return GenerateMarketingCopyResponse(content=fallback[:2200], model="rule-copy-v1")
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    request_text = {
+        "draftText": payload.draftText,
+        "tags": tags,
+        "tone": payload.tone,
+        "additionalRequest": payload.additionalRequest,
+    }
+    blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": json.dumps(request_text, ensure_ascii=False)}
+    ]
+    blocks.extend(_load_image_block(url) for url in payload.imageUrls)
+    response = llm.invoke(
+        [
+            SystemMessage(
+                content=(
+                    "사용자가 제공한 이미지, 초안, 태그에 맞는 Instagram 게시 글 하나만 작성하세요. "
+                    "컨설팅·매출·날씨·행사 등 제공되지 않은 사실을 추가하지 말고 이미지도 생성하지 마세요. "
+                    "제목, 설명, 마크다운 코드 블록 없이 바로 게시할 자연스러운 한국어 본문을 작성하고, "
+                    "제공된 태그만 글 마지막에 붙이세요. 전체 길이는 2200자 이하입니다."
+                )
+            ),
+            HumanMessage(content=blocks),
+        ]
+    )
+    content = _generated_text(response)
+    if not content:
+        raise ValueError("MARKETING_COPY_GENERATION_FAILED")
+    return GenerateMarketingCopyResponse(content=content[:2200], model=settings.ai_model)
+
+
 @app.post("/ai/chat", response_model=AiChatResponse)
 def ai_chat(
     payload: AiChatRequest,
@@ -541,6 +648,70 @@ def generate_daily_consulting(
         raise api_error(422, "DAILY_CONSULTING_GENERATION_FAILED", "일일 보고서 생성에 실패했습니다.")
 
 
+@app.post("/ai/forecasts/closing-sales", response_model=ClosingSalesForecastResponse)
+def forecast_closing_sales(
+    payload: ClosingSalesForecastRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_internal_key(x_internal_api_key)
+    transactions = [item.model_dump(mode="json") for item in payload.salesData]
+    if not any(item["status"] == "COMPLETED" for item in transactions):
+        raise api_error(422, "INSUFFICIENT_FORECAST_DATA", "예측 가능한 완료 거래가 없습니다.")
+    try:
+        as_of = payload.asOf.replace(tzinfo=None)
+        result = predict_closing_sales(transactions, as_of)
+        return {
+            "storeId": payload.storeId,
+            "businessDate": as_of.date(),
+            "currency": "KRW",
+            "observedSalesAmount": result["observedSalesAmount"],
+            "forecastClosingSalesAmount": result["forecastClosingSalesAmount"],
+            "model": result["model"],
+            "sampleDays": result["sampleDays"],
+            "generatedAt": datetime.now(timezone.utc),
+        }
+    except (KeyError, TypeError, ValueError):
+        raise api_error(500, "FORECAST_EXECUTION_FAILED", "마감 매출 예측 실행에 실패했습니다.")
+
+
+@app.post("/ai/forecasts/tomorrow-visitors", response_model=TomorrowVisitorsForecastResponse)
+def forecast_tomorrow_visitors(
+    payload: TomorrowVisitorsForecastRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_internal_key(x_internal_api_key)
+    transactions = [item.model_dump(mode="json") for item in payload.salesData]
+    if not any(item["status"] == "COMPLETED" for item in transactions):
+        raise api_error(422, "INSUFFICIENT_FORECAST_DATA", "예측 가능한 완료 거래가 없습니다.")
+    try:
+        result = predict_tomorrow_visitors(transactions, payload.baseDate)
+        return {
+            "storeId": payload.storeId,
+            "targetDate": result["targetDate"],
+            "expectedVisitors": result["expectedVisitors"],
+            "model": result["model"],
+            "sampleDays": result["sampleDays"],
+            "generatedAt": datetime.now(timezone.utc),
+        }
+    except (KeyError, TypeError, ValueError):
+        raise api_error(500, "FORECAST_EXECUTION_FAILED", "내일 방문자 예측 실행에 실패했습니다.")
+
+
+@app.post("/ai/marketings/copy", response_model=GenerateMarketingCopyResponse)
+def generate_marketing_copy(
+    payload: GenerateMarketingCopyRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> GenerateMarketingCopyResponse:
+    _require_internal_key(x_internal_api_key)
+    try:
+        return _generate_marketing_copy(payload)
+    except Exception as exc:
+        if isinstance(exc, TimeoutError) or "timeout" in exc.__class__.__name__.lower():
+            raise api_error(504, "AI_TIMEOUT", "마케팅 문구 생성 시간이 초과되었습니다.")
+        logger.exception("Marketing copy generation failed")
+        raise api_error(422, "MARKETING_COPY_GENERATION_FAILED", "마케팅 문구 생성에 실패했습니다.")
+
+
 @app.post(
     "/ai/marketings/{marketingId}/publish/instagram",
     response_model=PublishInstagramResponse,
@@ -549,22 +720,28 @@ def publish_instagram(
     marketingId: int,
     payload: PublishInstagramRequest,
     x_internal_api_key: str | None = Header(default=None),
-    x_instagram_access_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_internal_key(x_internal_api_key)
     try:
+        publish_payload = payload.model_dump(mode="json")
+        publish_payload["instagramPassword"] = payload.instagramPassword.get_secret_value()
         return publish_instagram_post(
             marketingId,
-            payload.model_dump(mode="json"),
-            access_token=x_instagram_access_token,
+            publish_payload,
         )
     except KeyError as exc:
         if exc.args and exc.args[0] == "DUPLICATE_PUBLISH_REQUEST":
             raise api_error(409, "DUPLICATE_PUBLISH_REQUEST", "이미 처리된 게시 요청입니다.")
         raise
-    except InstagramAccountNotConnected:
-        raise api_error(422, "INSTAGRAM_ACCOUNT_NOT_CONNECTED", "Instagram 계정 인증 정보가 없습니다.")
+    except InstagramCredentialsInvalid:
+        raise api_error(422, "INSTAGRAM_CREDENTIALS_INVALID", "Instagram 로그인 정보가 올바르지 않습니다.")
+    except InstagramLoginChallengeRequired:
+        raise api_error(
+            422,
+            "INSTAGRAM_LOGIN_CHALLENGE_REQUIRED",
+            "Instagram 추가 인증 또는 사용자 확인이 필요합니다.",
+        )
     except InstagramProviderTimeout:
         raise api_error(504, "INSTAGRAM_PUBLISH_TIMEOUT", "Instagram 게시 시간이 초과되었습니다.")
-    except InstagramProviderError:
-        raise api_error(502, "INSTAGRAM_PROVIDER_ERROR", "Instagram 게시 Provider 호출에 실패했습니다.")
+    except BrowserMCPUnavailable:
+        raise api_error(502, "BROWSER_MCP_UNAVAILABLE", "Browser MCP 게시 Tool 호출에 실패했습니다.")

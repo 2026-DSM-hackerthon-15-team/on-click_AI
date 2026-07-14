@@ -204,7 +204,7 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(45, request.call_args.kwargs["timeout"])
 
     @patch("src.api.main.requests.request")
-    def test_instagram_publish_forwards_provider_credential(self, request: Mock) -> None:
+    def test_instagram_publish_forwards_secret_only_in_internal_body(self, request: Mock) -> None:
         request.return_value = Mock(
             ok=True,
             json=lambda: {
@@ -219,30 +219,87 @@ class ApiContractTests(unittest.TestCase):
         )
         payload = {
             "userId": 4,
-            "instagramAccountId": "account-1",
+            "instagramUsername": "store_owner",
+            "instagramPassword": "safe-password-123",
             "content": "승인된 본문",
             "hashtags": ["#온클릭"],
             "imageUrls": ["https://cdn.example.com/image.jpg"],
-            "publishType": "FEED",
             "idempotencyKey": "marketing-21-v1",
         }
         response = self.client.post(
             "/ai/marketings/21/publish/instagram",
             json=payload,
-            headers={
-                "X-Internal-Api-Key": "secret",
-                "X-Instagram-Access-Token": "provider-token",
-            },
+            headers={"X-Internal-Api-Key": "secret"},
         )
         self.assertEqual(200, response.status_code)
         self.assertEqual(
-            "provider-token",
-            request.call_args.kwargs["headers"]["X-Instagram-Access-Token"],
+            "safe-password-123",
+            request.call_args.kwargs["json"]["instagramPassword"],
         )
+        self.assertNotIn("X-Instagram-Access-Token", request.call_args.kwargs["headers"])
+
+    @patch("src.api.main.requests.request")
+    def test_forecast_and_marketing_copy_are_proxied(self, request: Mock) -> None:
+        request.side_effect = [
+            Mock(
+                ok=True,
+                json=lambda: {
+                    "storeId": 10,
+                    "businessDate": "2026-07-14",
+                    "currency": "KRW",
+                    "observedSalesAmount": 60000,
+                    "forecastClosingSalesAmount": 100000,
+                    "model": "weekday-weighted-average-v1",
+                    "sampleDays": 1,
+                    "generatedAt": "2026-07-14T09:00:00Z",
+                },
+            ),
+            Mock(
+                ok=True,
+                json=lambda: {
+                    "content": "딸기 라떼로 달콤한 휴식을 즐겨보세요.",
+                    "model": "claude-sonnet-4-6",
+                },
+            ),
+        ]
+        sales_payload = {
+            "storeId": 10,
+            "asOf": "2026-07-14T18:00:00",
+            "salesData": [
+                {
+                    "soldAt": "2026-07-14T12:00:00",
+                    "totalPaidAmount": 60000,
+                    "status": "COMPLETED",
+                }
+            ],
+        }
+        forecast = self.client.post(
+            "/ai/forecasts/closing-sales",
+            json=sales_payload,
+            headers={"X-Internal-Api-Key": "secret"},
+        )
+        copy = self.client.post(
+            "/ai/marketings/copy",
+            json={
+                "userId": 4,
+                "imageUrls": ["https://cdn.example.com/menu.jpg"],
+                "draftText": "딸기 라떼 소개",
+                "tags": ["딸기라떼"],
+            },
+            headers={"X-Internal-Api-Key": "secret"},
+        )
+
+        self.assertEqual(200, forecast.status_code)
+        self.assertEqual(200, copy.status_code)
+        self.assertTrue(request.call_args_list[0].args[1].endswith("/ai/forecasts/closing-sales"))
+        self.assertTrue(request.call_args_list[1].args[1].endswith("/ai/marketings/copy"))
 
     def test_new_ai_endpoints_are_in_openapi(self) -> None:
         schema = self.client.get("/openapi.json").json()
         self.assertIn("/ai/consultings/daily", schema["paths"])
+        self.assertIn("/ai/forecasts/closing-sales", schema["paths"])
+        self.assertIn("/ai/forecasts/tomorrow-visitors", schema["paths"])
+        self.assertIn("/ai/marketings/copy", schema["paths"])
         self.assertIn(
             "/ai/marketings/{marketingId}/publish/instagram",
             schema["paths"],
@@ -251,6 +308,8 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual({"userId", "storeId", "targetDate"}, set(daily_request["required"]))
         instagram_request = schema["components"]["schemas"]["PublishInstagramRequest"]
         self.assertIn("idempotencyKey", instagram_request["required"])
+        self.assertIn("instagramPassword", instagram_request["required"])
+        self.assertNotIn("instagramAccountId", instagram_request["properties"])
 
 
 if __name__ == "__main__":

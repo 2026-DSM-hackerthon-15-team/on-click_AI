@@ -13,10 +13,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.consulting import analyze_consulting
 from src.errors import api_error, install_error_handlers
 from src.feature_contracts import (
+    ClosingSalesForecastRequest,
+    ClosingSalesForecastResponse,
+    GenerateMarketingCopyRequest,
+    GenerateMarketingCopyResponse,
     GenerateDailyConsultingRequest,
     GenerateDailyConsultingResponse,
     PublishInstagramRequest,
     PublishInstagramResponse,
+    TomorrowVisitorsForecastRequest,
+    TomorrowVisitorsForecastResponse,
 )
 from src.settings import settings
 from src.stats_service.forecasting import predict_closing_sales, predict_tomorrow_visitors
@@ -336,6 +342,65 @@ def generate_daily_consulting(
         raise api_error(422, "DAILY_CONSULTING_GENERATION_FAILED", "일일 보고서 응답이 올바르지 않습니다.")
 
 
+@app.post("/ai/forecasts/closing-sales", response_model=ClosingSalesForecastResponse)
+def forecast_closing_sales_ai(
+    payload: ClosingSalesForecastRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> ClosingSalesForecastResponse:
+    _require_internal_key(x_internal_api_key)
+    body = _proxy_json(
+        "POST",
+        f"{settings.ai_service_url}/ai/forecasts/closing-sales",
+        json=payload.model_dump(mode="json"),
+        headers={"X-Internal-Api-Key": settings.internal_api_key},
+        timeout_seconds=settings.ai_request_timeout_seconds,
+    )
+    try:
+        return ClosingSalesForecastResponse.model_validate(body)
+    except ValidationError:
+        raise api_error(502, "FORECAST_EXECUTION_FAILED", "마감 매출 예측 응답이 올바르지 않습니다.")
+
+
+@app.post("/ai/forecasts/tomorrow-visitors", response_model=TomorrowVisitorsForecastResponse)
+def forecast_tomorrow_visitors_ai(
+    payload: TomorrowVisitorsForecastRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> TomorrowVisitorsForecastResponse:
+    _require_internal_key(x_internal_api_key)
+    body = _proxy_json(
+        "POST",
+        f"{settings.ai_service_url}/ai/forecasts/tomorrow-visitors",
+        json=payload.model_dump(mode="json"),
+        headers={"X-Internal-Api-Key": settings.internal_api_key},
+        timeout_seconds=settings.ai_request_timeout_seconds,
+    )
+    try:
+        return TomorrowVisitorsForecastResponse.model_validate(body)
+    except ValidationError:
+        raise api_error(502, "FORECAST_EXECUTION_FAILED", "방문자 예측 응답이 올바르지 않습니다.")
+
+
+@app.post("/ai/marketings/copy", response_model=GenerateMarketingCopyResponse)
+def generate_marketing_copy(
+    payload: GenerateMarketingCopyRequest,
+    x_internal_api_key: str | None = Header(default=None),
+) -> GenerateMarketingCopyResponse:
+    _require_internal_key(x_internal_api_key)
+    body = _proxy_json(
+        "POST",
+        f"{settings.ai_service_url}/ai/marketings/copy",
+        json=payload.model_dump(mode="json"),
+        headers={"X-Internal-Api-Key": settings.internal_api_key},
+        timeout_seconds=settings.ai_request_timeout_seconds,
+        timeout_error_code="AI_TIMEOUT",
+        timeout_message="마케팅 문구 생성 시간이 초과되었습니다.",
+    )
+    try:
+        return GenerateMarketingCopyResponse.model_validate(body)
+    except ValidationError:
+        raise api_error(502, "MARKETING_COPY_GENERATION_FAILED", "마케팅 문구 응답이 올바르지 않습니다.")
+
+
 @app.post(
     "/ai/marketings/{marketingId}/publish/instagram",
     response_model=PublishInstagramResponse,
@@ -344,16 +409,15 @@ def publish_instagram(
     marketingId: int,
     payload: PublishInstagramRequest,
     x_internal_api_key: str | None = Header(default=None),
-    x_instagram_access_token: str | None = Header(default=None),
 ) -> PublishInstagramResponse:
     _require_internal_key(x_internal_api_key)
     headers = {"X-Internal-Api-Key": settings.internal_api_key}
-    if x_instagram_access_token:
-        headers["X-Instagram-Access-Token"] = x_instagram_access_token
+    publish_payload = payload.model_dump(mode="json")
+    publish_payload["instagramPassword"] = payload.instagramPassword.get_secret_value()
     body = _proxy_json(
         "POST",
         f"{settings.ai_service_url}/ai/marketings/{marketingId}/publish/instagram",
-        json=payload.model_dump(mode="json"),
+        json=publish_payload,
         headers=headers,
         timeout_seconds=settings.instagram_publish_timeout_seconds,
         timeout_error_code="INSTAGRAM_PUBLISH_TIMEOUT",
@@ -362,7 +426,7 @@ def publish_instagram(
     try:
         return PublishInstagramResponse.model_validate(body)
     except ValidationError:
-        raise api_error(502, "INSTAGRAM_PROVIDER_ERROR", "Instagram 게시 응답이 올바르지 않습니다.")
+        raise api_error(502, "BROWSER_MCP_UNAVAILABLE", "Instagram 게시 응답이 올바르지 않습니다.")
 
 
 @app.get("/stores")

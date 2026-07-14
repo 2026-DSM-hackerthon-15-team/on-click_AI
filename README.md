@@ -7,7 +7,7 @@
 | 포트 | 서비스 | 주요 역할 |
 |---|---|---|
 | 8000 | API Gateway | 매장 소유권, POS 원장, 대시보드, 채팅 내역, AI 프록시 |
-| 8001 | AI Service | 읽기 전용 도구형 채팅, 일일 컨설팅 보고서, Instagram 게시 |
+| 8001 | AI Service | 채팅, 일일 보고서, 예측 모델, 마케팅 문구, Browser MCP 게시 |
 | 8002 | MCP Service | 엄격한 JSON 형태의 날씨·주변 행사 데이터 |
 | 8003 | Stats Service | POS 거래 기반 마감 매출·내일 방문자 예측 |
 
@@ -15,7 +15,10 @@
 
 - `POST /ai/chat`: 질문에 대한 답변만 반환합니다. MCP·통계 Tool은 읽기 전용으로 사용할 수 있지만 컨설팅 생성·저장이나 마케팅 게시 같은 부수 효과는 실행하지 않습니다.
 - `POST /ai/consultings/daily`: 대상 날짜의 채팅 내역, 매장 지역·업종, POS 매출, 날씨·행사 MCP Tool, 마감 매출·방문자 예측을 종합해 `DAILY_V1` 고정 형식 보고서를 반환합니다. 저장은 메인 백엔드 책임입니다.
-- `POST /ai/marketings/{marketingId}/publish/instagram`: 사용자가 승인한 본문·해시태그·HTTPS 이미지 스냅샷을 변경 없이 게시합니다. `FEED`는 이미지 1개, `CAROUSEL`은 2~10개이며 멱등 키로 중복 요청을 막습니다.
+- `POST /ai/forecasts/closing-sales`: 백엔드가 전달한 POS 원장과 기준 시각으로 오늘 관측 매출과 마감 예상 총매출을 계산합니다.
+- `POST /ai/forecasts/tomorrow-visitors`: 완료 POS 결제 건수를 기반으로 다음 날 방문자 수를 예측합니다.
+- `POST /ai/marketings/copy`: 사용자가 입력한 이미지·초안·태그만 Claude Vision에 전달해 Instagram 게시 글 하나를 생성합니다.
+- `POST /ai/marketings/{marketingId}/publish/instagram`: 승인된 콘텐츠와 일회성 Instagram ID·비밀번호를 Browser MCP Tool에 전달해 웹 UI로 게시합니다.
 - `GET /stores/{storeId}/sales/transactions`: 정상·취소 POS 원장을 페이지/안정 정렬 규약에 맞춰 반환합니다.
 - `GET /stores/{storeId}/dashboard/*`: 완료 거래만 사용해 오늘 집계, 24시간 버킷, 마감 매출, 내일 방문자를 계산합니다.
 - `POST /ai/consultings`: 기존 기간 비교용 구조화 컨설팅 API이며, 새 일일 보고서는 `/ai/consultings/daily`를 사용합니다.
@@ -37,7 +40,7 @@ docker compose up --build
 
 `.env.example`을 `.env`로 복사해 백엔드 주소, 내부 키와 선택적 LLM 설정을 지정할 수 있습니다. `AI_PROVIDER=anthropic`은 `ANTHROPIC_API_KEY`, `AI_PROVIDER=openai`는 `OPENAI_API_KEY` 또는 공통 `AI_API_KEY`를 사용합니다. LLM 키 없이도 전체 POS/통계/컨설팅 데모가 동작합니다.
 
-Instagram 게시의 기본값은 안전한 로컬 `mock` Provider입니다. 실제 게시 시 `INSTAGRAM_PROVIDER=meta`로 설정하고, 메인 백엔드가 연결된 계정의 토큰을 `X-Instagram-Access-Token` 헤더로 내부 호출에 전달해야 합니다. 토큰은 요청 본문이나 저장소에 넣지 않습니다.
+Instagram 게시의 기본값은 안전한 로컬 `mock` Provider입니다. 실제 게시 시 `INSTAGRAM_PROVIDER=browser_mcp`, `BROWSER_MCP_URL`, `BROWSER_MCP_TOOL`을 설정합니다. 로그인 정보는 게시 요청에서만 전달하고 로그·DB·응답에 저장하지 않습니다. CAPTCHA·2FA·로그인 확인이 나타나면 자동 우회하지 않고 오류로 반환합니다.
 
 ## 호출 예시
 
@@ -66,13 +69,22 @@ curl -X POST http://localhost:8000/ai/consultings/daily \
   -d '{"userId":1,"storeId":10,"targetDate":"2026-07-14","reportFormat":"DAILY_V1"}'
 ```
 
-승인된 Instagram 게시물 업로드(`mock` Provider 예시):
+사용자 입력 기반 마케팅 문구 생성:
+
+```bash
+curl -X POST http://localhost:8000/ai/marketings/copy \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Api-Key: secret" \
+  -d '{"userId":1,"imageUrls":["https://cdn.example.com/menu.jpg"],"draftText":"신메뉴 딸기 라떼를 소개해줘","tags":["딸기라떼","대전카페"],"tone":"친근하게"}'
+```
+
+승인된 Instagram 게시물 Browser MCP 업로드(`mock` Provider 예시):
 
 ```bash
 curl -X POST http://localhost:8000/ai/marketings/21/publish/instagram \
   -H "Content-Type: application/json" \
   -H "X-Internal-Api-Key: secret" \
-  -d '{"userId":1,"instagramAccountId":"17841400000000000","content":"오늘의 신메뉴를 만나보세요!","hashtags":["#온클릭"],"imageUrls":["https://cdn.example.com/approved.jpg"],"publishType":"FEED","idempotencyKey":"marketing-21-instagram-v1"}'
+  -d '{"userId":1,"instagramUsername":"store_owner","instagramPassword":"safe-password-123","content":"오늘의 신메뉴를 만나보세요!","hashtags":["#온클릭"],"imageUrls":["https://cdn.example.com/approved.jpg"],"idempotencyKey":"marketing-21-instagram-v2"}'
 ```
 
 마감 매출 예측:
@@ -107,4 +119,4 @@ docker compose -f docker-compose.yml -f docker-compose.claude-test.yml up -d --f
 
 이후 `http://localhost:8000/docs`에서 `userId=1`, `storeId=10`, `chatRoomId=1`, `X-Internal-Api-Key`는 `.env`의 값을 사용합니다. 원격 백엔드 설정으로 돌아갈 때는 `docker compose up -d --force-recreate`를 실행합니다.
 
-테스트는 공통 오류 계약, 매장 격리, POS 페이지 조회, 24개 버킷, 취소 거래 제외, 요일 가중 예측, 채팅의 부수 효과 차단, 일일 보고서 고정 형식, Instagram 입력·멱등성·Meta 호출 순서를 검증합니다.
+테스트는 공통 오류 계약, 매장 격리, POS 페이지 조회, 24개 버킷, 취소 거래 제외, AI 서버 예측 계약, Claude Vision 문구 입력, 채팅 부수 효과 차단, 일일 보고서 고정 형식, Instagram 자격 증명 비노출·멱등성·Browser MCP 호출을 검증합니다.

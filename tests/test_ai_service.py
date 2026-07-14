@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -166,6 +167,95 @@ class AiServiceTests(unittest.TestCase):
         self.assertTrue(body["estimatedCauses"])
         self.assertTrue(body["recommendations"])
         self.assertEqual("TOTAL_SALES", body["keyMetrics"][0]["metricName"])
+
+    def test_closing_sales_forecast_internal_contract(self) -> None:
+        response = self.client.post(
+            "/ai/forecasts/closing-sales",
+            json={
+                "storeId": 10,
+                "asOf": "2026-07-14T18:00:00",
+                "salesData": [
+                    {
+                        "soldAt": "2026-07-07T12:00:00",
+                        "totalPaidAmount": 100000,
+                        "status": "COMPLETED",
+                    },
+                    {
+                        "soldAt": "2026-07-14T12:00:00",
+                        "totalPaidAmount": 60000,
+                        "status": "COMPLETED",
+                    },
+                ],
+            },
+            headers={"X-Internal-Api-Key": "secret"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(60000, response.json()["observedSalesAmount"])
+        self.assertGreaterEqual(response.json()["forecastClosingSalesAmount"], 60000)
+        self.assertEqual("weekday-weighted-average-v1", response.json()["model"])
+
+    def test_tomorrow_visitors_forecast_internal_contract(self) -> None:
+        response = self.client.post(
+            "/ai/forecasts/tomorrow-visitors",
+            json={
+                "storeId": 10,
+                "baseDate": "2026-07-14",
+                "salesData": [
+                    {
+                        "soldAt": "2026-07-08T12:00:00",
+                        "totalPaidAmount": 10000,
+                        "status": "COMPLETED",
+                    },
+                    {
+                        "soldAt": "2026-07-08T13:00:00",
+                        "totalPaidAmount": 12000,
+                        "status": "COMPLETED",
+                    },
+                ],
+            },
+            headers={"X-Internal-Api-Key": "secret"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("2026-07-15", response.json()["targetDate"])
+        self.assertEqual(2, response.json()["expectedVisitors"])
+
+    @patch(
+        "src.ai_service.main._load_image_block",
+        return_value={"type": "image", "base64": "aW1hZ2U=", "mime_type": "image/jpeg"},
+    )
+    @patch("src.ai_service.main._build_langchain_model")
+    def test_marketing_copy_uses_only_user_text_tags_and_images(
+        self, build_model: Mock, load_image: Mock
+    ) -> None:
+        llm = Mock()
+        llm.invoke.return_value = SimpleNamespace(
+            content="사진 속 딸기 라떼로 달콤한 휴식을 즐겨보세요.\n\n#딸기라떼"
+        )
+        build_model.return_value = llm
+        response = self.client.post(
+            "/ai/marketings/copy",
+            json={
+                "userId": 4,
+                "imageUrls": ["https://cdn.example.com/strawberry.jpg"],
+                "draftText": "신메뉴 딸기 라떼를 소개해줘",
+                "tags": ["딸기라떼"],
+                "tone": "친근하게",
+            },
+            headers={"X-Internal-Api-Key": "secret"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("claude-sonnet-4-6", response.json()["model"])
+        messages = llm.invoke.call_args.args[0]
+        image_blocks = [
+            block
+            for block in messages[1].content
+            if isinstance(block, dict) and block.get("type") == "image"
+        ]
+        self.assertEqual("aW1hZ2U=", image_blocks[0]["base64"])
+        load_image.assert_called_once_with("https://cdn.example.com/strawberry.jpg")
 
 
 if __name__ == "__main__":

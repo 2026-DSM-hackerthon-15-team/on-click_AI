@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
 class StrictModel(BaseModel):
@@ -71,23 +71,77 @@ class GenerateDailyConsultingResponse(StrictModel):
     model: str = Field(min_length=1)
 
 
+class SaleTransactionInput(StrictModel):
+    soldAt: datetime
+    totalPaidAmount: int = Field(ge=0)
+    status: Literal["COMPLETED", "CANCELLED"]
+
+
+class ClosingSalesForecastRequest(StrictModel):
+    storeId: int = Field(gt=0)
+    asOf: datetime
+    salesData: list[SaleTransactionInput] = Field(min_length=1, max_length=5000)
+
+
+class ClosingSalesForecastResponse(StrictModel):
+    storeId: int = Field(gt=0)
+    businessDate: date
+    currency: Literal["KRW"] = "KRW"
+    observedSalesAmount: int = Field(ge=0)
+    forecastClosingSalesAmount: int = Field(ge=0)
+    model: str = Field(min_length=1)
+    sampleDays: int = Field(ge=0)
+    generatedAt: datetime
+
+
+class TomorrowVisitorsForecastRequest(StrictModel):
+    storeId: int = Field(gt=0)
+    baseDate: date
+    salesData: list[SaleTransactionInput] = Field(min_length=1, max_length=5000)
+
+
+class TomorrowVisitorsForecastResponse(StrictModel):
+    storeId: int = Field(gt=0)
+    targetDate: date
+    expectedVisitors: int = Field(ge=0)
+    model: str = Field(min_length=1)
+    sampleDays: int = Field(ge=0)
+    generatedAt: datetime
+
+
+class GenerateMarketingCopyRequest(StrictModel):
+    userId: int = Field(gt=0)
+    imageUrls: list[str] = Field(min_length=1, max_length=10)
+    draftText: str = Field(min_length=1, max_length=2000)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    tone: str | None = Field(default=None, max_length=100)
+    additionalRequest: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_image_urls(self) -> "GenerateMarketingCopyRequest":
+        if any(not url.startswith("https://") for url in self.imageUrls):
+            raise ValueError("imageUrls must use HTTPS")
+        return self
+
+
+class GenerateMarketingCopyResponse(StrictModel):
+    content: str = Field(min_length=1, max_length=2200)
+    model: str = Field(min_length=1)
+
+
 class PublishInstagramRequest(StrictModel):
     userId: int = Field(gt=0)
-    instagramAccountId: str = Field(min_length=1, max_length=100)
+    instagramUsername: str = Field(min_length=1, max_length=100)
+    instagramPassword: SecretStr = Field(min_length=8, max_length=200)
     content: str = Field(min_length=1, max_length=2200)
     hashtags: list[str] = Field(default_factory=list, max_length=30)
     imageUrls: list[str] = Field(min_length=1, max_length=10)
-    publishType: Literal["FEED", "CAROUSEL"]
     idempotencyKey: str = Field(min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def validate_instagram_shape(self) -> "PublishInstagramRequest":
         if any(not url.startswith("https://") for url in self.imageUrls):
             raise ValueError("imageUrls must use HTTPS")
-        if self.publishType == "FEED" and len(self.imageUrls) != 1:
-            raise ValueError("FEED requires exactly one image")
-        if self.publishType == "CAROUSEL" and len(self.imageUrls) < 2:
-            raise ValueError("CAROUSEL requires at least two images")
         return self
 
 

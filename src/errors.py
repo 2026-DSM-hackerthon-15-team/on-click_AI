@@ -37,6 +37,12 @@ def install_error_handlers(app: FastAPI) -> None:
             error_code = "INVALID_AI_CHAT_REQUEST"
         elif request.url.path == "/ai/consultings/daily":
             error_code = "INVALID_DAILY_CONSULTING_REQUEST"
+        elif request.url.path == "/ai/forecasts/closing-sales":
+            error_code = "INVALID_CLOSING_SALES_FORECAST_REQUEST"
+        elif request.url.path == "/ai/forecasts/tomorrow-visitors":
+            error_code = "INVALID_TOMORROW_VISITORS_FORECAST_REQUEST"
+        elif request.url.path == "/ai/marketings/copy":
+            error_code = "INVALID_MARKETING_COPY_REQUEST"
         elif request.url.path.endswith("/publish/instagram"):
             error_code = "INVALID_INSTAGRAM_POST"
         else:
