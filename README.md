@@ -40,7 +40,7 @@ docker compose up --build
 
 `.env.example`을 `.env`로 복사해 백엔드 주소, 내부 키와 선택적 LLM 설정을 지정할 수 있습니다. `AI_PROVIDER=anthropic`은 `ANTHROPIC_API_KEY`, `AI_PROVIDER=openai`는 `OPENAI_API_KEY` 또는 공통 `AI_API_KEY`를 사용합니다. LLM 키 없이도 전체 POS/통계/컨설팅 데모가 동작합니다.
 
-Instagram 게시의 기본값은 안전한 로컬 `mock` Provider입니다. 실제 게시 시 `INSTAGRAM_PROVIDER=browser_mcp`, `BROWSER_MCP_URL`, `BROWSER_MCP_TOOL`을 설정합니다. 로그인 정보는 게시 요청에서만 전달하고 로그·DB·응답에 저장하지 않습니다. CAPTCHA·2FA·로그인 확인이 나타나면 자동 우회하지 않고 오류로 반환합니다.
+Instagram 게시의 기본값은 안전한 로컬 `mock` Provider입니다. 실제 게시 시 `INSTAGRAM_PROVIDER=browser_mcp` 또는 `INSTAGRAM_PROVIDER=instagrapi`를 설정합니다. `browser_mcp`는 `BROWSER_MCP_URL`과 `BROWSER_MCP_TOOL`이 필요하며, `instagrapi`는 `instagrapi` 라이브러리를 사용하여 Instagram 로그인과 업로드를 수행합니다. 로그인 정보는 게시 요청에서만 전달하고 로그·DB·응답에 저장하지 않습니다. CAPTCHA·2FA·로그인 확인이 나타나면 자동 우회하지 않고 오류로 반환합니다.
 
 ## 호출 예시
 

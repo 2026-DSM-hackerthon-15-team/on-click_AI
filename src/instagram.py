@@ -202,6 +202,116 @@ def _browser_publish(marketing_id: int, payload: dict[str, Any]) -> dict[str, An
     }
 
 
+def _download_images_to_temp(image_urls: list[str]) -> list[str]:
+    import requests
+    import tempfile
+    import os
+
+    paths: list[str] = []
+    for url in image_urls:
+        resp = requests.get(url, stream=True, timeout=10)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
+        ext = ".jpg"
+        if content_type == "image/png":
+            ext = ".png"
+        elif content_type == "image/webp":
+            ext = ".webp"
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+        try:
+            for chunk in resp.iter_content(64 * 1024):
+                if chunk:
+                    f.write(chunk)
+            f.flush()
+        finally:
+            f.close()
+        paths.append(f.name)
+    return paths
+
+
+def _instagrapi_publish(marketing_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    """Publish using instagrapi library. Downloads images, logs in, uploads, and returns publish info."""
+    try:
+        from instagrapi import Client
+        from instagrapi.exceptions import ClientError, ClientLoginError, TwoFactorRequired, ChallengeRequired
+    except ImportError as exc:
+        raise BrowserMCPUnavailable("INSTAGRP_CLIENT_NOT_INSTALLED") from exc
+
+    username = payload["instagramUsername"]
+    password = payload["instagramPassword"]
+    image_urls = payload["imageUrls"]
+    caption = payload.get("content", "") + " " + " ".join(payload.get("hashtags", []))
+
+    started = time.perf_counter()
+    log_event(
+        logger,
+        logging.INFO,
+        "instagrapi.publish.started",
+        upstreamService="INSTAGRAPI",
+        imageCount=len(image_urls),
+    )
+
+    temp_paths: list[str] = []
+    client = None
+    try:
+        temp_paths = _download_images_to_temp(image_urls)
+        client = Client()
+        client.login(username, password)
+
+        result: dict[str, Any]
+        if len(temp_paths) == 1:
+            result = client.photo_upload(temp_paths[0], caption=caption)
+        else:
+            result = client.album_upload(temp_paths, caption=caption)
+
+        # instagrapi returns various shapes; try to extract code or pk
+        external = result.get("code") or result.get("media_code") or str(result.get("pk") or "")
+        published_url = f"https://www.instagram.com/p/{external}/" if external else None
+        log_event(
+            logger,
+            logging.INFO,
+            "instagrapi.publish.completed",
+            upstreamService="INSTAGRAPI",
+            latencyMs=round((time.perf_counter() - started) * 1000, 2),
+        )
+        return {
+            "marketingId": marketing_id,
+            "platform": "INSTAGRAM",
+            "status": "PUBLISHED",
+            "externalPostId": external,
+            "publishedUrl": published_url,
+            "publishedAt": datetime.now(timezone.utc),
+            "failureReason": None,
+        }
+    except (TwoFactorRequired, ChallengeRequired) as exc:
+        raise InstagramLoginChallengeRequired from exc
+    except ClientLoginError as exc:
+        raise InstagramCredentialsInvalid from exc
+    except ClientError as exc:
+        # treat client errors as provider unavailability
+        raise BrowserMCPUnavailable("INSTAGRP_CLIENT_ERROR") from exc
+    except Exception as exc:
+        # network/timeout or unexpected
+        exception_name = exc.__class__.__name__.lower()
+        if "timeout" in exception_name or isinstance(exc, TimeoutError):
+            raise InstagramProviderTimeout from exc
+        raise BrowserMCPUnavailable("INSTAGRP_PUBLISH_FAILED") from exc
+    finally:
+        # cleanup temp files
+        for p in temp_paths:
+            try:
+                import os
+
+                os.unlink(p)
+            except Exception:
+                pass
+        if client is not None:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+
 def publish_instagram(marketing_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     """Publish an approved snapshot without logging or persisting credentials."""
     key = str(payload["idempotencyKey"])
@@ -214,6 +324,8 @@ def publish_instagram(marketing_id: int, payload: dict[str, Any]) -> dict[str, A
             return _mock_publish(marketing_id, payload)
         if settings.instagram_provider == "browser_mcp":
             return _browser_publish(marketing_id, payload)
+        if settings.instagram_provider == "instagrapi":
+            return _instagrapi_publish(marketing_id, payload)
         raise BrowserMCPUnavailable("INSTAGRAM_PROVIDER_NOT_SUPPORTED")
     except Exception:
         with _registry_lock:

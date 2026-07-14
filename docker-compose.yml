@@ -4,7 +4,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    command: bash -c "python -m pip install --no-cache-dir -r requirements.txt && python -m src.main"
+    command: bash -c "python -m pip install --no-cache-dir -r requirements.txt && python -m pip install --no-cache-dir --no-deps instagrapi && python -m src.main"
+
     environment:
       API_BASE_URL: ${API_BASE_URL:-http://127.0.0.1:8000}
       AI_SERVICE_URL: http://127.0.0.1:8001
