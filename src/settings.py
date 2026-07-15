@@ -67,6 +67,15 @@ class Settings:
     instagram_publish_timeout_seconds: float = float(
         os.getenv("INSTAGRAM_PUBLISH_TIMEOUT_SECONDS", "30")
     )
+    # MCP Service API keys
+    weather_api_key: str | None = os.getenv("WEATHER_API_KEY")
+    weather_provider: str = os.getenv("WEATHER_PROVIDER", "openweathermap").lower()
+    naver_api_key: str | None = os.getenv("NAVER_API_KEY")
+    naver_api_secret: str | None = os.getenv("NAVER_API_SECRET")
+    naver_client_id: str | None = os.getenv("NAVER_CLIENT_ID")
+    naver_client_secret: str | None = os.getenv("NAVER_CLIENT_SECRET")
+    event_provider: str = os.getenv("EVENT_PROVIDER", "public_data").lower()
+    location_service_api_key: str | None = os.getenv("LOCATION_SERVICE_API_KEY")
 
 
 settings = Settings()
