@@ -95,15 +95,17 @@ class DailyConsultingTests(unittest.TestCase):
             "data": {"storeId": 5, "name": "매장", "region": "서울", "industry": "CAFE"},
         },
     )
-    def test_daily_report_fails_when_every_data_tool_fails(self, _store, _chat, tool_map) -> None:
+    def test_daily_report_degrades_when_every_data_tool_fails(self, _store, _chat, tool_map) -> None:
         tool_map.return_value = {
             name: (lambda: {"ok": False, "error": "unavailable"})
             for name in _tool_results()
         }
-        with self.assertRaisesRegex(RuntimeError, "TOOL_EXECUTION_ERROR"):
-            generate_daily_consulting(
-                {"userId": 4, "storeId": 5, "targetDate": "2026-07-14"}
-            )
+        result = generate_daily_consulting(
+            {"userId": 4, "storeId": 5, "targetDate": "2026-07-14"}
+        )
+
+        self.assertIn("연동 데이터 조회가 모두 실패", result["content"])
+        self.assertEqual("daily-consulting-v1", result["model"])
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import socket
 import time
 from datetime import date, datetime, timezone
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from fastapi import FastAPI, Header, HTTPException
@@ -520,21 +520,35 @@ def _generated_text(value: Any) -> str:
 
 def _load_image_block(url: str) -> dict[str, str]:
     parsed = urlparse(url)
-    target = safe_upstream_target(url)
+    is_backend_media = parsed.path.startswith("/public/media/")
+    download_url = (
+        urljoin(f"{settings.api_base_url}/", parsed.path.lstrip("/"))
+        if is_backend_media
+        else url
+    )
+    download_parsed = urlparse(download_url)
+    target = safe_upstream_target(download_url)
     started = time.perf_counter()
-    if parsed.scheme != "https" or not parsed.hostname:
+    if not download_parsed.hostname or (not is_backend_media and download_parsed.scheme != "https"):
         raise ValueError("INVALID_MARKETING_IMAGE_URL")
-    try:
-        addresses = {
-            item[4][0]
-            for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443)
-        }
-    except socket.gaierror as exc:
-        raise ValueError("MARKETING_IMAGE_DNS_FAILED") from exc
-    for address in addresses:
-        ip = ipaddress.ip_address(address)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            raise ValueError("MARKETING_IMAGE_URL_BLOCKED")
+    if not is_backend_media:
+        try:
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(download_parsed.hostname, download_parsed.port or 443)
+            }
+        except socket.gaierror as exc:
+            raise ValueError("MARKETING_IMAGE_DNS_FAILED") from exc
+        for address in addresses:
+            ip = ipaddress.ip_address(address)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                raise ValueError("MARKETING_IMAGE_URL_BLOCKED")
+
+    headers = {"User-Agent": "on-click-ai/1.0 (marketing-image-fetcher)"}
+    if is_backend_media:
+        from src.auth import backend_authorization_header
+
+        headers.update(backend_authorization_header())
 
     log_event(
         logger,
@@ -545,10 +559,8 @@ def _load_image_block(url: str) -> dict[str, str]:
     )
     try:
         with requests.get(
-            url,
-            headers=request_headers(
-                {"User-Agent": "on-click-ai/1.0 (marketing-image-fetcher)"}
-            ),
+            download_url,
+            headers=request_headers(headers),
             stream=True,
             allow_redirects=False,
             timeout=settings.request_timeout_seconds,

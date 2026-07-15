@@ -571,6 +571,7 @@ def forecast_closing_sales_ai(
         f"{settings.stats_service_url}/forecast",
         json={
             "storeId": payload.storeId,
+            "asOf": payload.asOf.isoformat(),
             "salesData": payload.salesData,
         },
         headers={"Authorization": authorization},
@@ -605,6 +606,7 @@ def forecast_tomorrow_visitors_ai(
         f"{settings.stats_service_url}/forecast",
         json={
             "storeId": payload.storeId,
+            "baseDate": payload.baseDate.isoformat(),
             "salesData": payload.salesData,
         },
         headers={"Authorization": authorization},

@@ -4,8 +4,18 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+def _backend_local_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(KST).replace(tzinfo=None)
 
 
 class StrictModel(BaseModel):
@@ -49,10 +59,22 @@ class ConsultingMetric(StrictModel):
 
 
 class GenerateDailyConsultingRequest(StrictModel):
-    userId: int = Field(gt=0)
-    storeId: int = Field(gt=0)
-    targetDate: date
-    reportFormat: Literal["DAILY_V1"] = "DAILY_V1"
+    userId: int | None = Field(default=None)
+    storeId: int | None = Field(default=None)
+    targetDate: date | None = None
+    reportFormat: str | None = None
+
+    @model_validator(mode="after")
+    def normalize_fields(self) -> "GenerateDailyConsultingRequest":
+        if self.userId is None:
+            self.userId = 0
+        if self.storeId is None:
+            self.storeId = 0
+        if self.targetDate is None:
+            self.targetDate = date.today()
+        if self.reportFormat is None:
+            self.reportFormat = "DAILY_V1"
+        return self
 
 
 class GenerateDailyConsultingResponse(StrictModel):
@@ -78,9 +100,17 @@ class SaleTransactionInput(StrictModel):
 
 
 class ClosingSalesForecastRequest(StrictModel):
-    storeId: int = Field(gt=0)
-    asOf: datetime
-    salesData: list[SaleTransactionInput] = Field(min_length=1, max_length=5000)
+    storeId: int | None = Field(default=None)
+    asOf: datetime | None = None
+    salesData: list[SaleTransactionInput] = Field(default_factory=list, max_length=5000)
+
+    @model_validator(mode="after")
+    def normalize_fields(self) -> "ClosingSalesForecastRequest":
+        if self.storeId is None:
+            self.storeId = 0
+        if self.asOf is None:
+            self.asOf = datetime.now()
+        return self
 
 
 class ClosingSalesForecastResponse(StrictModel):
@@ -93,11 +123,23 @@ class ClosingSalesForecastResponse(StrictModel):
     sampleDays: int = Field(ge=0)
     generatedAt: datetime
 
+    _normalize_generated_at = field_validator("generatedAt", mode="after")(
+        _backend_local_datetime
+    )
+
 
 class TomorrowVisitorsForecastRequest(StrictModel):
-    storeId: int = Field(gt=0)
-    baseDate: date
-    salesData: list[SaleTransactionInput] = Field(min_length=1, max_length=5000)
+    storeId: int | None = Field(default=None)
+    baseDate: date | None = None
+    salesData: list[SaleTransactionInput] = Field(default_factory=list, max_length=5000)
+
+    @model_validator(mode="after")
+    def normalize_fields(self) -> "TomorrowVisitorsForecastRequest":
+        if self.storeId is None:
+            self.storeId = 0
+        if self.baseDate is None:
+            self.baseDate = date.today()
+        return self
 
 
 class TomorrowVisitorsForecastResponse(StrictModel):
@@ -107,6 +149,10 @@ class TomorrowVisitorsForecastResponse(StrictModel):
     model: str = Field(min_length=1)
     sampleDays: int = Field(ge=0)
     generatedAt: datetime
+
+    _normalize_generated_at = field_validator("generatedAt", mode="after")(
+        _backend_local_datetime
+    )
 
 
 class GenerateMarketingCopyRequest(StrictModel):
@@ -119,8 +165,8 @@ class GenerateMarketingCopyRequest(StrictModel):
 
     @model_validator(mode="after")
     def validate_image_urls(self) -> "GenerateMarketingCopyRequest":
-        if any(not url.startswith("https://") for url in self.imageUrls):
-            raise ValueError("imageUrls must use HTTPS")
+        if any(not url.startswith(("http://", "https://")) for url in self.imageUrls):
+            raise ValueError("imageUrls must use HTTP or HTTPS")
         return self
 
 
@@ -163,3 +209,7 @@ class PublishInstagramResponse(StrictModel):
     publishedUrl: str | None = None
     publishedAt: datetime | None = None
     failureReason: str | None = None
+
+    _normalize_published_at = field_validator("publishedAt", mode="after")(
+        lambda value: _backend_local_datetime(value) if value is not None else None
+    )
