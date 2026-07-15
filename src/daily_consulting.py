@@ -134,8 +134,10 @@ def generate_daily_consulting(payload: dict[str, Any]) -> dict[str, Any]:
     )
     executions.append(execution)
     if not store_result.get("ok"):
-        raise ValueError("STORE_OR_CHAT_CONTEXT_NOT_FOUND")
-    store = store_result["data"]
+        warnings.append("매장 상세 문맥을 불러오지 못해 기본 정보로 보고서를 생성했습니다.")
+        store = {"storeId": store_id, "name": f"{store_id}번 매장"}
+    else:
+        store = store_result["data"]
 
     chat_result, execution = _execution(
         "today_chat_history",
@@ -163,7 +165,7 @@ def generate_daily_consulting(payload: dict[str, Any]) -> dict[str, Any]:
             warnings.append(f"{name} 데이터를 사용할 수 없습니다.")
 
     if not any(result.get("ok") for result in results.values()):
-        raise RuntimeError("TOOL_EXECUTION_ERROR")
+        warnings.append("연동 데이터 조회가 모두 실패해 제한된 정보로 보고서를 생성했습니다.")
 
     sales = results.get("sales_analysis", {}).get("data") or {}
     closing = results.get("closing_sales_forecast", {}).get("data") or {}

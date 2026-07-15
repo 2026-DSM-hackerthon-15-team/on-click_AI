@@ -51,7 +51,7 @@ def _ai_model() -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    api_base_url: str = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+    api_base_url: str = os.getenv("API_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
     ai_service_url: str = os.getenv("AI_SERVICE_URL", "http://127.0.0.1:8001").rstrip("/")
     mcp_service_url: str = os.getenv("MCP_SERVICE_URL", "http://127.0.0.1:8002").rstrip("/")
     stats_service_url: str = os.getenv("STATS_SERVICE_URL", "http://127.0.0.1:8003").rstrip("/")

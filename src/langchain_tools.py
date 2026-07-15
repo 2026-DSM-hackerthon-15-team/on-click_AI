@@ -178,7 +178,8 @@ def _store_context_from_list(store_id: int, user_id: int) -> ToolResult:
     )
     if store is None:
         return _failed("JWT 사용자가 소유한 매장 목록에서 대상 매장을 찾을 수 없습니다.", "STORE_NOT_FOUND")
-    region = store.get("region")
+    # The production backend exposes the store location as roadAddress.
+    region = store.get("region") or store.get("roadAddress")
     industry = store.get("industry")
     if not region or not industry:
         return _failed("매장에 지역 또는 업종 정보가 없습니다.", "STORE_CONTEXT_MISSING")

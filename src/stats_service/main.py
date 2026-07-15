@@ -34,6 +34,8 @@ class ForecastRequest(BaseModel):
     storeId: int
     start: str | None = None
     end: str | None = None
+    asOf: datetime | None = None
+    baseDate: date | None = None
     salesData: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -147,9 +149,10 @@ def forecast(
 ) -> dict[str, Any]:
     require_backend_jwt(authorization)
     transactions = req.salesData or _load_transactions(req.storeId)
-    now = datetime.now(KST).replace(tzinfo=None)
+    now = req.asOf.replace(tzinfo=None) if req.asOf else datetime.now(KST).replace(tzinfo=None)
+    base_date = req.baseDate or now.date()
     closing = predict_closing_sales(transactions, now)
-    visitors = predict_tomorrow_visitors(transactions, now.date())
+    visitors = predict_tomorrow_visitors(transactions, base_date)
     return {
         "storeId": req.storeId,
         "businessDate": now.date().isoformat(),
