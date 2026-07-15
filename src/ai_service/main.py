@@ -396,9 +396,19 @@ def _run_langchain_agent(payload: AiChatRequest, allowed: list[str]) -> AiChatRe
                 )
             for call in tool_calls:
                 name = call.get("name")
+                call_id = call.get("id")
                 arguments = call.get("args") or {}
+                
+                # name과 id가 없으면 skip (무효한 tool_calls)
+                if not name or not call_id:
+                    logger.warning("Skipping tool_call with missing name or id: %s", call)
+                    continue
+                
                 started = time.perf_counter()
                 try:
+                    # tool_map에 없는 도구인지 확인
+                    if name not in tool_map:
+                        raise KeyError(f"Tool '{name}' not found in tool_map")
                     result = tool_map[name].invoke(arguments)
                 except Exception as exc:
                     result = {"ok": False, "error": str(exc)}
@@ -416,7 +426,7 @@ def _run_langchain_agent(payload: AiChatRequest, allowed: list[str]) -> AiChatRe
                 messages.append(
                     ToolMessage(
                         content=_summary(result, 4000),
-                        tool_call_id=call["id"],
+                        tool_call_id=call_id,
                     )
                 )
         return AiChatResponse(
